@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import shutil
-from dataclasses import replace
 import tarfile
+from dataclasses import replace
 from pathlib import Path
 
 import cv2
