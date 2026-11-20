@@ -2,12 +2,6 @@
 
 Pipeline DAG:
     discover -> ingest -> validate -> transform -> quality_metrics -> publish_gold -> analytics
-
-Operational properties:
-- Bounded retries with exponential backoff on transient I/O stages
-- PostgreSQL persistence of PipelineRun and per-stage StageRun status & checkpoints
-- Idempotent re-execution and safe resumability after interruption
-- Failure isolation: stage failures record exact diagnostics and mark run status cleanly
 """
 
 from __future__ import annotations
@@ -21,7 +15,10 @@ from prefect import flow, task
 from prefect.cache_policies import NO_CACHE
 
 from vista.analytics.duckdb_runner import execute_analytical_sql_suite, run_dbt_build
-from vista.analytics.gold_publisher import publish_gold_datasets
+from vista.analytics.gold_publisher import (
+    export_operational_telemetry,
+    publish_gold_datasets,
+)
 from vista.analytics.mlflow_hook import log_gold_snapshot_to_mlflow
 from vista.analytics.reports import generate_eda_figures_and_reports
 from vista.config import VistaConfig
@@ -50,7 +47,7 @@ def _execute_stage(
         stage_id = stage.stage_run_id
 
     try:
-        result, items_ok, items_failed, checkpoint = fn()
+        result, items_ok, items_failed, checkpoint = fn(stage_id)
         with db.session() as sess:
             MetadataRepository(sess).finish_stage_run(
                 stage_id,
@@ -80,7 +77,7 @@ def discover_task(
     run_id: str,
     local_archive_override: Path | None = None,
 ) -> dict[str, Any]:
-    def _run():
+    def _run(_stage_id: int):
         ws_info = storage.check_workspace()
         spec = get_category_spec(cfg, category)
         if local_archive_override is not None:
@@ -118,7 +115,7 @@ def ingest_task(
     local_archive_override: Path | None = None,
     upload_to_remote: bool = True,
 ) -> dict[str, Any]:
-    def _run():
+    def _run(_stage_id: int):
         summary = ingest_category_to_bronze(
             cfg=cfg,
             storage=storage,
@@ -147,7 +144,7 @@ def validate_task(
     category_root: str,
     run_id: str,
 ) -> dict[str, Any]:
-    def _run():
+    def _run(_stage_id: int):
         summary = validate_category(
             cfg=cfg,
             storage=storage,
@@ -172,7 +169,7 @@ def transform_task(
     run_id: str,
     upload_to_remote: bool = True,
 ) -> dict[str, Any]:
-    def _run():
+    def _run(_stage_id: int):
         summary = transform_category_to_silver(
             cfg=cfg,
             storage=storage,
@@ -197,7 +194,7 @@ def quality_metrics_task(
     category_root: str,
     run_id: str,
 ) -> dict[str, Any]:
-    def _run():
+    def _run(_stage_id: int):
         summary = extract_category_quality(
             cfg=cfg,
             db=db,
@@ -220,25 +217,33 @@ def publish_gold_task(
     run_id: str,
     upload_to_remote: bool = True,
 ) -> dict[str, Any]:
-    def _run():
-        exports = publish_gold_datasets(
+    def _run(stage_id: int):
+        snapshot = publish_gold_datasets(
             cfg=cfg,
             storage=storage,
             db=db,
             run_id=run_id,
             upload_to_remote=upload_to_remote,
+            exclude_in_flight_stage_run_id=stage_id,
         )
         mlflow_run_id = log_gold_snapshot_to_mlflow(
             cfg=cfg,
             run_id=run_id,
             category=category,
-            gold_exports=exports,
+            snapshot=snapshot,
         )
         summary = {
-            "tables": {e.table_name: e.row_count for e in exports},
+            "snapshot_id": snapshot.snapshot_id,
+            "status": snapshot.status,
+            "reused_existing": snapshot.reused_existing,
+            "manifest_sha256": snapshot.manifest_sha256,
+            "manifest_remote_uri": snapshot.manifest_remote_uri,
+            "local_snapshot_dir": str(snapshot.local_snapshot_dir),
+            "train_manifest_hashes": snapshot.train_manifest_hashes,
+            "tables": {e.table_name: e.row_count for e in snapshot.tables},
             "mlflow_run_id": mlflow_run_id,
         }
-        return summary, len(exports), 0, summary
+        return summary, len(snapshot.tables), 0, summary
 
     return _execute_stage(db, run_id, "publish_gold", category, _run)
 
@@ -249,12 +254,30 @@ def analytics_task(
     db: DatabaseSessionManager,
     category: str,
     run_id: str,
+    snapshot_dir: str | None = None,
 ) -> dict[str, Any]:
-    def _run():
-        dbt_res = run_dbt_build(cfg)
+    def _run(_stage_id: int):
+        # Export authoritative post-publish operational telemetry (now includes SUCCEEDED publish_gold!)
+        tel = export_operational_telemetry(cfg=cfg, db=db)
+        snap_path = Path(snapshot_dir) if snapshot_dir else None
+        dbt_res = run_dbt_build(
+            cfg,
+            snapshot_dir=snap_path,
+            telemetry_dir=Path(tel["telemetry_dir"]),
+        )
         sql_res = execute_analytical_sql_suite(cfg)
-        rep_res = generate_eda_figures_and_reports(cfg, sql_res)
+        rep_res = generate_eda_figures_and_reports(
+            cfg,
+            sql_res,
+            snapshot_id=dbt_res["snapshot_id"],
+            manifest_sha256=dbt_res["manifest_sha256"],
+            telemetry_meta=tel,
+        )
         summary = {
+            "snapshot_id": dbt_res["snapshot_id"],
+            "manifest_sha256": dbt_res["manifest_sha256"],
+            "telemetry_cutoff_utc": tel["telemetry_cutoff_utc"],
+            "telemetry_consistency_issues": tel["consistency_issues"],
             "dbt_duckdb": dbt_res["duckdb_path"],
             "sql_queries_executed": len(sql_res),
             "reports": rep_res,
@@ -321,7 +344,17 @@ def run_category_pipeline(
         gold = publish_gold_task(
             cfg, storage, db, category, run_id, upload_to_remote=upload_to_remote
         )
-        ana = analytics_task(cfg, db, category, run_id) if run_analytics else None
+        ana = (
+            analytics_task(
+                cfg,
+                db,
+                category,
+                run_id,
+                snapshot_dir=gold["local_snapshot_dir"],
+            )
+            if run_analytics
+            else None
+        )
 
         with db.session() as sess:
             MetadataRepository(sess).finish_pipeline_run(run_id, "SUCCEEDED")

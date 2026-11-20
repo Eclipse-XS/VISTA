@@ -2,7 +2,7 @@ version: 2
 
 models:
   - name: stg_categories
-    description: "Staged MVTec 3D-AD dataset categories from Gold Parquet."
+    description: "Staged MVTec 3D-AD dataset categories from committed Gold snapshot."
     columns:
       - name: category_name
         tests: [unique, not_null]
@@ -29,10 +29,38 @@ models:
           - accepted_values:
               values: ["PASS", "WARN", "QUARANTINE", "FAIL"]
   - name: stg_quality_metrics
-    description: "Staged RGB and 3D sample quality metrics."
+    description: "Staged raw global & foreground-aware RGB/3D sample quality metrics."
     columns:
       - name: metric_id
         tests: [unique, not_null]
+  - name: stg_normalization_artifacts
+    description: "Staged frozen train-only normalization parameter artifacts."
+    columns:
+      - name: norm_artifact_id
+        tests: [unique, not_null]
+      - name: artifact_key
+        tests: [unique, not_null]
+      - name: train_manifest_hash
+        tests: [not_null]
+      - name: params_sha256
+        tests: [not_null]
+  - name: stg_ml_normalized_features
+    description: "Staged ML-safe features normalized strictly with frozen train-only parameters."
+    columns:
+      - name: norm_feature_id
+        tests: [unique, not_null]
+      - name: norm_artifact_id
+        tests: [not_null]
+  - name: stg_stage_runs
+    description: "Staged operational stage run attempts with retry metadata."
+    columns:
+      - name: stage_run_id
+        tests: [unique, not_null]
+      - name: stage_status
+        tests:
+          - not_null
+          - accepted_values:
+              values: ["RUNNING", "SUCCEEDED", "FAILED", "INTERRUPTED", "SKIPPED"]
   - name: stg_silver_artifacts
     description: "Staged Silver derived geometric artifacts (depth, normals, valid mask)."
     columns:

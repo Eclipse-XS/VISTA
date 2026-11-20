@@ -1,4 +1,4 @@
--- Grain: 1 row per pipeline stage execution joined to parent pipeline run
+-- Grain: 1 row per pipeline stage attempt joined to parent pipeline run
 SELECT
     st.stage_run_id,
     st.run_id,
@@ -7,6 +7,8 @@ SELECT
     pr.dataset_version,
     pr.preprocessing_version,
     st.stage_name,
+    st.attempt_number,
+    st.is_retry,
     st.stage_status,
     pr.run_status,
     st.started_at,
@@ -15,7 +17,10 @@ SELECT
     st.items_processed,
     st.items_failed,
     CASE
-        WHEN st.duration_seconds IS NOT NULL AND st.duration_seconds > 0 AND st.items_processed > 0
+        WHEN st.stage_status = 'SUCCEEDED'
+         AND st.duration_seconds IS NOT NULL
+         AND st.duration_seconds > 0
+         AND st.items_processed > 0
         THEN st.items_processed / st.duration_seconds
         ELSE NULL
     END AS items_per_second,

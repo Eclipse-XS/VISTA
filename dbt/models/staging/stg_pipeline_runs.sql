@@ -10,4 +10,4 @@ SELECT
     duration_seconds,
     config_json,
     error_message
-FROM read_parquet('{{ env_var("VISTA_GOLD_DIR") }}/pipeline_runs.parquet')
+FROM read_parquet('{{ env_var("VISTA_TELEMETRY_DIR", env_var("VISTA_GOLD_DIR")) }}/pipeline_runs.parquet')

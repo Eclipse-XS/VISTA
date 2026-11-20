@@ -20,7 +20,7 @@ VISTA is implemented as a **modular monolith** following a **Medallion architect
 |---|---|---|
 | **Bronze** | `bronze/mvtec_3d_ad/<category>/` | Immutable official `.tar.xz` source archives, provenance/checksum manifests (`SHA-256`, `MD5`), raw sample index |
 | **Silver** | `silver/mvtec_3d_ad/<ver>_<hash>/<category>/` | Validated, spatially aligned float32 depth maps, validity masks, and valid-neighbor-gated unit surface normal maps stored as byte-for-byte deterministic `.npz` bundles |
-| **Gold** | `gold/mvtec_3d_ad/<dataset_version>/` | Explicit-schema PyArrow Parquet tables (inventory, validation, quality metrics, lineage, pipeline telemetry, and label-isolated `training_ready_samples.parquet`) |
+| **Gold** | `gold/mvtec_3d_ad/snapshots/<snapshot_id>/` | Immutable, content-addressed PyArrow Parquet snapshots (`manifest.json` atomic commit marker, `schemas.json`), frozen train-only `normalization_artifacts.parquet`, ML-safe `ml_normalized_features.parquet`, label-isolated `training_ready_samples.parquet`, and separate `evaluation_samples.parquet` |
 | **Quarantine** | `quarantine/mvtec_3d_ad/<category>/` | Explicit JSON quarantine manifests for corrupted, misaligned, or cross-split-leaking samples without altering benchmark annotations |
 
 ### Technology Stack
@@ -82,8 +82,16 @@ docker compose up -d postgres
 # 6. Run the full end-to-end Prefect pipeline for a single category
 .\.venv\Scripts\python.exe -m vista run-category cable_gland
 
-# 7. Run unit and integration tests
-.\.venv\Scripts\python.exe -m pytest -v
+# 7. Independently verify the latest committed Gold snapshot
+.\.venv\Scripts\python.exe -m vista verify-snapshot
+
+# 8. Run offline CI suite (lint + hygiene + unit/integration/dbt tests)
+.\.venv\Scripts\ruff.exe check src tests scripts
+.\.venv\Scripts\python.exe scripts/check_repo_hygiene.py
+.\.venv\Scripts\python.exe -m pytest -m "not live" -v
+
+# 9. Run live Google Drive workspace test (requires local rclone gdrive: auth)
+.\.venv\Scripts\python.exe -m pytest -m live -v
 ```
 
 ---
@@ -103,12 +111,13 @@ VISTA/
 │       ├── logging.py            # Structured logging (structlog)
 │       ├── cli.py                # CLI (`python -m vista ...`)
 │       ├── storage/              # Path validation, StorageBackend ABC, Rclone & Local backends
-│       ├── metadata/             # PostgreSQL SQLAlchemy schema & idempotent repository
+│       ├── metadata/             # PostgreSQL SQLAlchemy schema, additive migrations & repository
 │       ├── ingestion/            # Official catalog, resumable Range downloader, Bronze ingestor
 │       ├── validation/           # Multimodal RGB/XYZ/GT rules, duplicate & leakage detector
-│       ├── quality/              # RGB & 3D quality metrics + robust unsupervised outlier flags
-│       ├── preprocessing/        # Deterministic XYZ -> depth & normal Silver transforms
-│       ├── analytics/            # Gold Parquet publisher, dbt/DuckDB runner, EDA reports, MLflow hook
+│       ├── quality/              # Global & foreground-aware quality + frozen train-only normalization
+│       ├── preprocessing/        # Deterministic XYZ -> depth & normal Silver transforms & shards
+│       ├── contracts/            # Explicit Bronze/Silver/Gold contracts & PyTorch-ready dataset loader
+│       ├── analytics/            # Atomic immutable Gold snapshots, dbt/DuckDB runner, EDA & MLflow hook
 │       └── orchestration/        # Prefect dependent pipeline flows & tasks
 ├── dbt/                          # DuckDB dbt project (staging, core dim/fct, marts, data tests)
 ├── analytics/
@@ -139,11 +148,13 @@ VISTA/
 - Category-by-category resumable ingestion from official MVTec 3D-AD archives (`CC BY-NC-SA 4.0`).
 - Multimodal RGB/XYZ/GT validation (respecting official `class_ids.json` defect encodings), exact/near-duplicate checks, cross-split leakage checks, and quarantine manifests.
 - Deterministic Bronze-to-Silver depth & surface normal generation with byte-identical SHA-256 checksums, per-split `.tar` shards, and Bronze-to-Silver lineage tracking.
-- Unsupervised RGB & 3D data quality extraction with split-stratified robust MAD outlier flagging.
-- PostgreSQL operational metadata & stage-checkpoint persistence + Gold Parquet publishing with label-isolated `training_ready_samples.parquet`.
-- DuckDB + `dbt` analytical warehouse (`dim_*`, `fct_*`, `mart_*`), automated dbt tests, 10 analytical SQL queries, and reproducible EDA reports/figures.
-- Prefect workflow orchestration and MLflow dataset-snapshot logging hook (`sqlite:///mlruns/mlflow.db`).
-- **Verified Real-Dataset Coverage:** `cable_gland` (354 samples: 223 `train`, 23 `validation`, 108 `test` across `good`, `bent`, `cut`, `hole`, `thread`; 253 `PASS`, 101 `WARN` perceptual near-duplicates under fixed lighting, 0 `QUARANTINE`, 0 `FAIL`, 0 cross-split leaks; 246 label-isolated training-ready samples; 354/354 reliable Silver surface normals). See [analytics/reports/eda_report.md](analytics/reports/eda_report.md) and [analytics/reports/data_quality_report.md](analytics/reports/data_quality_report.md).
+- Unsupervised global + foreground-aware (`fg_otsu_plane_v1`) RGB & 3D quality extraction separating object-level coverage from dark-table background dropouts without using test GT masks.
+- Leak-free train-only ML normalization (`normalization_artifacts` + `ml_normalized_features`) fitted exclusively on eligible `train` samples and applied frozen to `validation` and `test`.
+- Atomic, content-addressed, immutable Gold snapshots (`gold/mvtec_3d_ad/snapshots/<snapshot_id>/`) with independent manifest/checksum verification, MLflow snapshot registration, and PyTorch-ready `VistaMultimodalDataset` loader.
+- Authoritative PostgreSQL operational telemetry with retry/attempt tracking, non-NULL duration aggregation, and consistency assertions.
+- DuckDB + `dbt` analytical warehouse (`dim_*`, `fct_*`, `mart_*`), automated dbt tests, 15 analytical SQL queries, and reproducible EDA reports/figures.
+- GitHub Actions CI (Ruff lint, secret/artifact hygiene, unit + offline integration + dbt fixture tests without private credentials).
+- **Verified Real-Dataset Coverage:** `cable_gland` (354 samples: 223 `train`, 23 `validation`, 108 `test` across `good`, `bent`, `cut`, `hole`, `thread`; 253 `PASS`, 101 `WARN` perceptual near-duplicates, 0 `QUARANTINE`, 0 `FAIL`, 0 cross-split leaks; 246 label-isolated training-ready samples; 108 held-out evaluation samples; 354/354 reliable Silver normals; on-object 3D missingness `1.55–1.80%` vs background dropout `42.18–50.14%`). See [analytics/reports/eda_report.md](analytics/reports/eda_report.md) and [analytics/reports/data_quality_report.md](analytics/reports/data_quality_report.md).
 
 ### Planned ML Research Components (Not Yet Implemented)
 - Quality-aware RGB + 3D multimodal feature extraction and adaptive fusion architectures.

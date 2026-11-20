@@ -1,7 +1,14 @@
-"""Metadata and lineage persistence package."""
+"""Metadata, normalization provenance, snapshot, and lineage persistence package."""
 
 from vista.metadata.database import DatabaseSessionManager, create_db_engine, init_db
 from vista.metadata.models import (
+    PIPELINE_ALL_STATUSES,
+    PIPELINE_INTERMEDIATE_STATUSES,
+    PIPELINE_TERMINAL_STATUSES,
+    SNAPSHOT_STATUSES,
+    STAGE_ALL_STATUSES,
+    STAGE_INTERMEDIATE_STATUSES,
+    STAGE_TERMINAL_STATUSES,
     ArtifactLineage,
     Base,
     BronzeArchive,
@@ -9,6 +16,9 @@ from vista.metadata.models import (
     DatasetVersion,
     FileManifest,
     GoldExport,
+    GoldSnapshot,
+    MLNormalizedFeature,
+    NormalizationArtifact,
     PipelineRun,
     QualityMetric,
     Sample,
@@ -16,9 +26,16 @@ from vista.metadata.models import (
     StageRun,
     ValidationResult,
 )
-from vista.metadata.repository import MetadataRepository
+from vista.metadata.repository import MetadataRepository, SnapshotImmutabilityError
 
 __all__ = [
+    "PIPELINE_ALL_STATUSES",
+    "PIPELINE_INTERMEDIATE_STATUSES",
+    "PIPELINE_TERMINAL_STATUSES",
+    "SNAPSHOT_STATUSES",
+    "STAGE_ALL_STATUSES",
+    "STAGE_INTERMEDIATE_STATUSES",
+    "STAGE_TERMINAL_STATUSES",
     "ArtifactLineage",
     "Base",
     "BronzeArchive",
@@ -27,11 +44,15 @@ __all__ = [
     "DatasetVersion",
     "FileManifest",
     "GoldExport",
+    "GoldSnapshot",
+    "MLNormalizedFeature",
     "MetadataRepository",
+    "NormalizationArtifact",
     "PipelineRun",
     "QualityMetric",
     "Sample",
     "SilverArtifact",
+    "SnapshotImmutabilityError",
     "StageRun",
     "ValidationResult",
     "create_db_engine",

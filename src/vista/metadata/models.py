@@ -1,4 +1,4 @@
-"""SQLAlchemy 2.0 operational metadata, lineage, and run-state schema for PostgreSQL."""
+"""SQLAlchemy 2.0 operational metadata, lineage, normalization, and snapshot schema."""
 
 from __future__ import annotations
 
@@ -17,6 +17,17 @@ from sqlalchemy import (
     UniqueConstraint,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+# Canonical operational status taxonomies
+PIPELINE_TERMINAL_STATUSES: frozenset[str] = frozenset({"SUCCEEDED", "FAILED", "INTERRUPTED"})
+PIPELINE_INTERMEDIATE_STATUSES: frozenset[str] = frozenset({"RUNNING"})
+PIPELINE_ALL_STATUSES: frozenset[str] = PIPELINE_TERMINAL_STATUSES | PIPELINE_INTERMEDIATE_STATUSES
+
+STAGE_TERMINAL_STATUSES: frozenset[str] = frozenset({"SUCCEEDED", "FAILED", "INTERRUPTED", "SKIPPED"})
+STAGE_INTERMEDIATE_STATUSES: frozenset[str] = frozenset({"RUNNING"})
+STAGE_ALL_STATUSES: frozenset[str] = STAGE_TERMINAL_STATUSES | STAGE_INTERMEDIATE_STATUSES
+
+SNAPSHOT_STATUSES: frozenset[str] = frozenset({"STAGED", "COMMITTED", "FAILED"})
 
 
 def utcnow() -> datetime:
@@ -75,6 +86,8 @@ class StageRun(Base):
     run_id: Mapped[str] = mapped_column(ForeignKey("pipeline_runs.run_id"), nullable=False, index=True)
     stage_name: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     category_name: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    attempt_number: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    is_retry: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="RUNNING")
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -116,8 +129,7 @@ class Sample(Base):
     dataset_version: Mapped[str] = mapped_column(String(64), nullable=False)
     category_name: Mapped[str] = mapped_column(ForeignKey("categories.name"), nullable=False, index=True)
     split: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
-    # Note: defect_type and is_anomalous_benchmark are benchmark labels for test split
-    # and MUST remain isolated from training-data preparation and model fitting.
+    # Benchmark labels for test split MUST remain isolated from training preparation & fitting.
     defect_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     is_anomalous_benchmark: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
     sample_id: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -201,6 +213,17 @@ class ValidationResult(Base):
 
 
 class QualityMetric(Base):
+    """Raw per-sample global & foreground-aware quality metrics plus descriptive EDA flags.
+
+    IMPORTANT:
+    - Raw global and foreground-aware columns depend strictly on the sample's own RGB & XYZ data.
+    - `z_mean_robust_z`, `missing_ratio_robust_z`, `sharpness_robust_z`,
+      `rgb_quality_outlier_flag`, and `geometry_outlier_flag` are DESCRIPTIVE EDA-ONLY
+      indicators (computed per split for exploratory inspection) and MUST NEVER be consumed
+      as ML features. Use `ml_normalized_features` (fitted strictly on eligible `train` rows)
+      for any model-facing workflow.
+    """
+
     __tablename__ = "quality_metrics"
     __table_args__ = (
         UniqueConstraint(
@@ -213,7 +236,7 @@ class QualityMetric(Base):
     run_id: Mapped[Optional[str]] = mapped_column(ForeignKey("pipeline_runs.run_id"), nullable=True)
     preprocessing_version: Mapped[str] = mapped_column(String(64), nullable=False)
     config_hash: Mapped[str] = mapped_column(String(32), nullable=False)
-    # RGB metrics
+    # Global RGB metrics
     rgb_brightness_mean: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     rgb_brightness_std: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     rgb_contrast_rms: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
@@ -224,7 +247,7 @@ class QualityMetric(Base):
     rgb_underexposed_ratio: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     rgb_overexposed_ratio: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     rgb_dynamic_range: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
-    # 3D geometry metrics
+    # Global 3D geometry metrics
     valid_point_ratio: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     missing_point_ratio: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     nan_point_ratio: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
@@ -240,12 +263,92 @@ class QualityMetric(Base):
     z_span: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     bbox_volume: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     point_density_proxy: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
-    # Unsupervised outlier indicators (computed within category+split without using test labels)
+    # Foreground-aware & framing metrics (unsupervised; never uses test GT masks)
+    fg_method_version: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    fg_area_ratio: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    fg_3d_area_ratio: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    fg_rgb_3d_iou: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    fg_bbox_fill_ratio: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    fg_center_offset_norm: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    fg_rgb_brightness_mean: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    fg_rgb_contrast_rms: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    fg_rgb_laplacian_var: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    fg_rgb_saturation_mean: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    fg_rgb_underexposed_ratio: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    fg_rgb_overexposed_ratio: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    fg_valid_3d_ratio: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    fg_missing_3d_ratio: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    bg_missing_3d_ratio: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    bg_rgb_brightness_mean: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    fg_z_mean: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    fg_z_std: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    fg_height_above_plane_max: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    fg_plane_inlier_ratio: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    # Descriptive EDA-only within-split robust z-scores (NOT for ML feature consumption)
     z_mean_robust_z: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     missing_ratio_robust_z: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     sharpness_robust_z: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     rgb_quality_outlier_flag: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     geometry_outlier_flag: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    computed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+class NormalizationArtifact(Base):
+    """Frozen train-only normalization parameters for leak-free ML feature scaling."""
+
+    __tablename__ = "normalization_artifacts"
+
+    norm_artifact_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    artifact_key: Mapped[str] = mapped_column(String(256), unique=True, nullable=False, index=True)
+    dataset_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    category_name: Mapped[str] = mapped_column(ForeignKey("categories.name"), nullable=False, index=True)
+    preprocessing_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    config_hash: Mapped[str] = mapped_column(String(32), nullable=False)
+    norm_version: Mapped[str] = mapped_column(String(32), nullable=False, default="norm_v1")
+    train_manifest_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    train_sample_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    eligible_statuses_json: Mapped[str] = mapped_column(Text, nullable=False)
+    feature_names_json: Mapped[str] = mapped_column(Text, nullable=False)
+    params_json: Mapped[str] = mapped_column(Text, nullable=False)
+    params_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    run_id: Mapped[Optional[str]] = mapped_column(ForeignKey("pipeline_runs.run_id"), nullable=True)
+    fitted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+class MLNormalizedFeature(Base):
+    """ML-safe quality features normalized strictly using frozen train-only parameters."""
+
+    __tablename__ = "ml_normalized_features"
+    __table_args__ = (
+        UniqueConstraint("sample_pk", "norm_artifact_id", name="uq_ml_norm_sample_artifact"),
+    )
+
+    norm_feature_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    sample_pk: Mapped[int] = mapped_column(ForeignKey("samples.sample_pk"), nullable=False, index=True)
+    norm_artifact_id: Mapped[int] = mapped_column(
+        ForeignKey("normalization_artifacts.norm_artifact_id"), nullable=False, index=True
+    )
+    dataset_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    category_name: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    split: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    preprocessing_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    config_hash: Mapped[str] = mapped_column(String(32), nullable=False)
+    norm_version: Mapped[str] = mapped_column(String(32), nullable=False, default="norm_v1")
+    train_manifest_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    run_id: Mapped[Optional[str]] = mapped_column(ForeignKey("pipeline_runs.run_id"), nullable=True)
+    # Frozen train-referenced robust z-scores
+    norm_fg_rgb_brightness: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    norm_fg_rgb_contrast_rms: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    norm_fg_rgb_laplacian_var: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    norm_fg_rgb_saturation: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    norm_fg_missing_3d_ratio: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    norm_fg_z_std: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    norm_fg_area_ratio: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    norm_fg_rgb_3d_iou: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    norm_global_missing_3d_ratio: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    norm_global_rgb_brightness: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    train_ref_rgb_outlier_flag: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    train_ref_geometry_outlier_flag: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     computed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
 
@@ -303,10 +406,37 @@ class ArtifactLineage(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
 
+class GoldSnapshot(Base):
+    """Immutable, content-addressed Gold dataset snapshot registry (staged -> committed)."""
+
+    __tablename__ = "gold_snapshots"
+
+    snapshot_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    dataset_version: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    preprocessing_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    config_hash: Mapped[str] = mapped_column(String(32), nullable=False)
+    data_content_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="STAGED", index=True)
+    categories_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    sample_count: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    train_manifest_hashes_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    source_archives_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    code_provenance: Mapped[str] = mapped_column(String(128), nullable=False, default="unknown")
+    local_snapshot_dir: Mapped[str] = mapped_column(Text, nullable=False)
+    remote_prefix_uri: Mapped[str] = mapped_column(Text, nullable=False)
+    manifest_remote_uri: Mapped[str] = mapped_column(Text, nullable=False)
+    manifest_sha256: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    telemetry_cutoff_utc: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    run_id: Mapped[Optional[str]] = mapped_column(ForeignKey("pipeline_runs.run_id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    committed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class GoldExport(Base):
     __tablename__ = "gold_exports"
 
     export_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    snapshot_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True, index=True)
     dataset_version: Mapped[str] = mapped_column(String(64), nullable=False)
     table_name: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     row_count: Mapped[int] = mapped_column(BigInteger, nullable=False)

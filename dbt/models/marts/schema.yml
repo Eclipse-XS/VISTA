@@ -26,8 +26,25 @@ models:
     columns:
       - name: sample_pk
         tests: [not_null]
+      - name: partition
+        tests:
+          - not_null
+          - accepted_values:
+              values: ["train", "validation"]
       - name: split
         tests:
           - not_null
           - accepted_values:
               values: ["train", "validation"]
+  - name: mart_foreground_vs_global_quality
+    columns:
+      - name: category_name
+        tests: [not_null]
+      - name: split
+        tests: [not_null]
+  - name: mart_split_distribution_shift
+    columns:
+      - name: category_name
+        tests: [not_null]
+      - name: feature_name
+        tests: [not_null]
