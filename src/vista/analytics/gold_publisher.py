@@ -26,9 +26,11 @@ import hashlib
 import json
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
 import pyarrow as pa
@@ -58,7 +60,7 @@ from vista.metadata.models import (
     ValidationResult,
 )
 from vista.metadata.repository import MetadataRepository, SnapshotImmutabilityError
-from vista.storage.base import StorageBackend, sha256_file
+from vista.storage.base import StorageBackend, md5_file, sha256_file
 from vista.storage.paths import (
     gold_latest_pointer_path,
     gold_snapshot_file_path,
@@ -260,6 +262,59 @@ def export_operational_telemetry(
         json.dumps(meta, indent=2, sort_keys=True), encoding="utf-8"
     )
     return {**meta, "telemetry_dir": str(target_dir)}
+
+
+def _verify_remote_staged_artifacts(
+    *, storage: StorageBackend, snapshot_id: str, staged_dir: Path
+) -> None:
+    """Fail closed unless all remote Gold data objects match their local staged bytes.
+
+    The remote manifest is the COMMITTED marker.  A prior interrupted rclone
+    upload may leave already-existing remote objects that --ignore-existing
+    will skip on retry; never publish a manifest over unverified remote data.
+    """
+    with TemporaryDirectory(prefix="vista-remote-verify-", dir=staged_dir.parent) as tmp:
+        verify_dir = Path(tmp)
+        for local_file in sorted(staged_dir.iterdir()):
+            if not local_file.is_file() or local_file.name == "manifest.json":
+                continue
+
+            remote_path = gold_snapshot_file_path(snapshot_id, local_file.name)
+            info = None
+            for attempt in range(3):
+                info = storage.stat(remote_path)
+                if info is not None:
+                    break
+                if attempt < 2:
+                    time.sleep(attempt + 1)
+
+            if info is None or info.is_dir or info.size_bytes != local_file.stat().st_size:
+                raise SnapshotImmutabilityError(
+                    f"Remote precommit integrity failure for {remote_path!r}: "
+                    "missing object, directory, or incorrect size"
+                )
+
+            if info.md5:
+                if info.md5.lower() != md5_file(local_file).lower():
+                    raise SnapshotImmutabilityError(
+                        f"Remote precommit MD5 mismatch for {remote_path!r}; "
+                        "refusing COMMITTED manifest publication"
+                    )
+            else:
+                # Some S3-compatible remotes do not expose a reliable MD5.
+                # Download to a bounded temporary file and compare SHA-256.
+                downloaded = verify_dir / local_file.name
+                try:
+                    storage.download_file(remote_path, downloaded, skip_if_exists=False)
+                except Exception as exc:
+                    raise SnapshotImmutabilityError(
+                        f"Remote precommit read-back failed for {remote_path!r}"
+                    ) from exc
+                if sha256_file(downloaded) != sha256_file(local_file):
+                    raise SnapshotImmutabilityError(
+                        f"Remote precommit SHA-256 mismatch for {remote_path!r}; "
+                        "refusing COMMITTED manifest publication"
+                    )
 
 
 def publish_gold_datasets(
@@ -611,6 +666,9 @@ def publish_gold_datasets(
                     f"Remote committed manifest already exists at {manifest_remote_rel!r}; refusing overwrite"
                 )
             storage.upload_directory(stage_dir, remote_prefix, overwrite=False)
+            _verify_remote_staged_artifacts(
+                storage=storage, snapshot_id=snapshot_id, staged_dir=stage_dir
+            )
 
         # Build committed manifest.json ONLY after all data artifacts are staged & uploaded
         created_at_iso = datetime.now(timezone.utc).isoformat()
