@@ -1,0 +1,7 @@
+vista_duckdb:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      path: "{{ env_var('VISTA_DUCKDB_PATH', '../data/warehouse/vista_analytics.duckdb') }}"
+      threads: 4

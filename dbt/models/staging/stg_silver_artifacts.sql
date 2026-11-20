@@ -1,0 +1,23 @@
+SELECT
+    artifact_id,
+    sample_pk,
+    run_id,
+    preprocessing_version,
+    config_hash,
+    config_json,
+    depth_relpath,
+    depth_remote_uri,
+    depth_sha256,
+    depth_size_bytes,
+    normal_relpath,
+    normal_remote_uri,
+    normal_sha256,
+    normal_size_bytes,
+    normal_valid_ratio,
+    normal_reliable,
+    valid_mask_relpath,
+    valid_mask_sha256,
+    spatial_alignment_verified,
+    status AS artifact_status,
+    CAST(created_at AS TIMESTAMPTZ) AS created_at
+FROM read_parquet('{{ env_var("VISTA_GOLD_DIR") }}/silver_artifacts.parquet')

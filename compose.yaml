@@ -1,0 +1,41 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: vista-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${VISTA_PG_DB:-vista_metadata}
+      POSTGRES_USER: ${VISTA_PG_USER:-vista}
+      POSTGRES_PASSWORD: ${VISTA_PG_PASSWORD:-vista_local_dev}
+    ports:
+      - "127.0.0.1:${VISTA_PG_PORT:-5435}:5432"
+    volumes:
+      - vista_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${VISTA_PG_USER:-vista} -d ${VISTA_PG_DB:-vista_metadata}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.17.2
+    container_name: vista-mlflow
+    profiles: ["mlflow"]
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${VISTA_MLFLOW_PORT:-5050}:5000"
+    command: >
+      mlflow server
+      --host 0.0.0.0
+      --port 5000
+      --backend-store-uri sqlite:////mlflow/mlflow.db
+      --default-artifact-root /mlflow/artifacts
+    volumes:
+      - vista_mlflow_data:/mlflow
+
+volumes:
+  vista_pg_data:
+  vista_mlflow_data:

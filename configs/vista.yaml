@@ -1,0 +1,92 @@
+project:
+  name: vista
+  dataset_name: mvtec_3d_ad
+  dataset_version: "1.0.0"
+  source_homepage: "https://www.mvtec.com/company/research/datasets/mvtec-3d-ad"
+  source_downloads_page: "https://www.mvtec.com/company/research/datasets/mvtec-3d-ad/downloads"
+  license: "CC BY-NC-SA 4.0 (Non-Commercial Academic/Research Use Only)"
+  citation: "Bergmann et al., 'The MVTec 3D-AD Dataset for Unsupervised 3D Anomaly Detection and Localization', VISAPP 2022"
+
+# Official category archives published on MVTec's downloads page.
+# Do NOT download all categories automatically without explicit approval.
+categories:
+  bagel:
+    url: "https://www.mydrive.ch/shares/45891/477cd0a09ea8683b7b77463cc205baa8/download/428793580-1643274607/bagel.tar.xz"
+    archive_filename: "bagel.tar.xz"
+    approx_size_mb: 1640
+    material_type: organic
+  cable_gland:
+    url: "https://www.mydrive.ch/shares/45892/8836f2fd7407ec1c54dc165a5b8a2e91/download/428792309-1643274318/cable_gland.tar.xz"
+    archive_filename: "cable_gland.tar.xz"
+    approx_size_mb: 338
+    material_type: manufactured
+  carrot:
+    url: "https://www.mydrive.ch/shares/163794/2eb070b7735ca71ef4eea76d1ad7ac50/download/428796332-1643279674/carrot.tar.xz"
+    archive_filename: "carrot.tar.xz"
+    approx_size_mb: 2210
+    material_type: organic
+  cookie:
+    url: "https://www.mydrive.ch/shares/163795/8247bdadbe9b40ee4335f1657162b563/download/428796516-1643279760/cookie.tar.xz"
+    archive_filename: "cookie.tar.xz"
+    approx_size_mb: 676
+    material_type: organic
+  dowel:
+    url: "https://www.mydrive.ch/shares/45895/4bc9099f7976819d8d458453e831fc7c/download/428793974-1643275086/dowel.tar.xz"
+    archive_filename: "dowel.tar.xz"
+    approx_size_mb: 543
+    material_type: manufactured
+  foam:
+    url: "https://www.mydrive.ch/shares/163796/87cf7f53c5401d7dfaa6cfcd69a63ae8/download/428797064-1643280010/foam.tar.xz"
+    archive_filename: "foam.tar.xz"
+    approx_size_mb: 2190
+    material_type: manufactured
+  peach:
+    url: "https://www.mydrive.ch/shares/163797/815fc12403e2efaa489224230fc7abdf/download/428797463-1643280185/peach.tar.xz"
+    archive_filename: "peach.tar.xz"
+    approx_size_mb: 1330
+    material_type: organic
+  potato:
+    url: "https://www.mydrive.ch/shares/45898/7b07b3c833a309112d6daca71f31cba2/download/428797964-1643276600/potato.tar.xz"
+    archive_filename: "potato.tar.xz"
+    approx_size_mb: 1990
+    material_type: organic
+  rope:
+    url: "https://www.mydrive.ch/shares/45899/cec7d3a6c2585260ddcc58dd2269e0ee/download/428798351-1643276827/rope.tar.xz"
+    archive_filename: "rope.tar.xz"
+    approx_size_mb: 1220
+    material_type: manufactured
+  tire:
+    url: "https://www.mydrive.ch/shares/45900/c8261149763d942e033a22a0e8597b5d/download/428798689-1643276973/tire.tar.xz"
+    archive_filename: "tire.tar.xz"
+    approx_size_mb: 1120
+    material_type: manufactured
+
+validation:
+  expected_rgb_channels: 3
+  expected_xyz_channels: 3
+  min_valid_3d_ratio_warn: 0.25
+  min_valid_3d_ratio_fail: 0.01
+  zero_depth_epsilon: 1.0e-6
+  max_abs_coordinate: 100.0
+  detect_near_duplicates: true
+  near_duplicate_dhash_distance: 2
+
+preprocessing:
+  version: "silver_v1"
+  depth_unit: "meters"
+  zero_depth_epsilon: 1.0e-6
+  compute_normals: true
+  normal_min_valid_neighbor_ratio: 0.10
+  normal_max_step_meters: 0.05
+  save_depth_preview_png: true
+  save_normal_preview_png: true
+  batch_size: 32
+  cleanup_local_bronze_after_silver: false
+
+quality:
+  underexposed_threshold: 15
+  overexposed_threshold: 240
+  outlier_robust_z_threshold: 3.5
+
+cache:
+  max_local_cache_gb: 6.0

@@ -1,0 +1,33 @@
+version: 2
+
+models:
+  - name: mart_category_quality
+    columns:
+      - name: category_name
+        tests: [not_null]
+      - name: sample_count
+        tests: [not_null]
+  - name: mart_dataset_inventory
+    columns:
+      - name: category_name
+        tests: [not_null]
+      - name: split
+        tests:
+          - not_null
+          - accepted_values:
+              values: ["train", "validation", "test"]
+  - name: mart_defect_distribution
+    columns:
+      - name: category_name
+        tests: [not_null]
+      - name: defect_type
+        tests: [not_null]
+  - name: mart_training_ready_samples
+    columns:
+      - name: sample_pk
+        tests: [not_null]
+      - name: split
+        tests:
+          - not_null
+          - accepted_values:
+              values: ["train", "validation"]

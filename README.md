@@ -1,0 +1,160 @@
+# VISTA — Vision Inspection with Spatial and Texture Adaptation
+
+**Production-oriented Data Engineering platform for multimodal RGB + 3D industrial anomaly detection using the official MVTec 3D-AD benchmark dataset.**
+
+> **Current Phase:** Data Engineering, multimodal data validation, Medallion storage, metadata/lineage, analytical warehousing (DuckDB + dbt), and reproducible EDA. Computer-vision model training is intentionally deferred to the next research phase.
+
+---
+
+## 1. Research Objective
+
+Industrial quality inspection increasingly pairs high-resolution **RGB texture cameras** with **organized 3D point clouds / depth sensors**. VISTA's overarching research goal is **quality-aware multimodal RGB + 3D anomaly detection and localization** on MVTec 3D-AD: understanding how photometric degradations (blur, exposure clipping, low contrast) and geometric sensing artifacts (structured-light dropouts, missing 3D points, unstable surface normals) interact across industrial and organic object categories, and preparing reproducible, leak-free multimodal datasets for future adaptive fusion models.
+
+---
+
+## 2. Data Engineering Architecture
+
+VISTA is implemented as a **modular monolith** following a **Medallion architecture** designed for bounded local disk usage (Windows 11 + WSL2) and durable cloud storage on Google Drive, with an S3-portable storage interface:
+
+| Layer | Location (`gdrive:VISTA MVTEC3D/`) | Responsibilities |
+|---|---|---|
+| **Bronze** | `bronze/mvtec_3d_ad/<category>/` | Immutable official `.tar.xz` source archives, provenance/checksum manifests (`SHA-256`, `MD5`), raw sample index |
+| **Silver** | `silver/mvtec_3d_ad/<ver>_<hash>/<category>/` | Validated, spatially aligned float32 depth maps, validity masks, and valid-neighbor-gated unit surface normal maps stored as byte-for-byte deterministic `.npz` bundles |
+| **Gold** | `gold/mvtec_3d_ad/<dataset_version>/` | Explicit-schema PyArrow Parquet tables (inventory, validation, quality metrics, lineage, pipeline telemetry, and label-isolated `training_ready_samples.parquet`) |
+| **Quarantine** | `quarantine/mvtec_3d_ad/<category>/` | Explicit JSON quarantine manifests for corrupted, misaligned, or cross-split-leaking samples without altering benchmark annotations |
+
+### Technology Stack
+
+- **Processing & Media:** Python 3.11+, NumPy, PyArrow, OpenCV, `tifffile`, SciPy, Matplotlib
+- **Durable Storage:** `rclone` + Google Drive (`VISTA MVTEC3D`) behind an S3-portable `StorageBackend` abstraction
+- **Operational Metadata & Lineage:** PostgreSQL 16 (via Docker Compose) + SQLAlchemy 2.0 (zero large binary BLOBs in Postgres)
+- **Analytical Warehouse:** DuckDB + `dbt-duckdb` (`stg_*` → `dim_*` / `fct_*` → `mart_*`) + automated dbt data tests + 10 SQL analytical queries
+- **Orchestration:** Prefect 3 dependent workflows (`discover → ingest → validate → transform → quality_metrics → publish_gold → analytics`)
+- **Experiment Provenance Hook:** MLflow tracking hook logging versioned Gold Parquet URIs, checksums, and dataset snapshot metrics
+
+---
+
+## 3. Google Drive Workspace Integration
+
+All remote storage operations are strictly confined to a single dedicated folder in Google Drive root:
+
+- **Workspace Folder:** `gdrive:VISTA MVTEC3D/`
+- **Safeguards enforced in code (`src/vista/storage/`):**
+  - Application-level path validation rejects absolute paths, `..`, backslashes, URI/remote prefixes, and paths outside Medallion prefixes (`bronze/`, `silver/`, `gold/`, `quarantine/`, `manifests/`, `_healthcheck/`).
+  - Driver-level folder pinning via `--drive-root-folder-id` keeps all rclone calls inside `VISTA MVTEC3D`.
+  - Destructive rclone commands (`sync`, `delete`, `deletefile`, `purge`, `rmdir`) are blocked in code.
+  - Bronze uploads enforce immutability (`BronzeImmutabilityError` on differing content).
+- **Important Note:** Path validation and `--drive-root-folder-id` are **operational safeguards**, not Google OAuth permission boundaries. OAuth credentials remain exclusively in local `~/.config/rclone/rclone.conf` and are never committed.
+- **AWS S3 Migration:** See [docs/storage_s3_migration.md](docs/storage_s3_migration.md) — switching to AWS S3 requires changing only `configs/storage.env`.
+
+---
+
+## 4. Local Setup & Execution
+
+### Prerequisites
+
+- Python 3.11+ (Windows 11 or WSL2 Ubuntu 24.04)
+- Docker Desktop / Docker Compose
+- Authenticated `rclone` remote named `gdrive:` (existing local `~/.config/rclone/rclone.conf`)
+
+### Quick Start
+
+```powershell
+# 1. Create virtual environment and install VISTA
+py -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
+
+# 2. Configure local environment files (never commit configs/storage.env or .env)
+Copy-Item configs\storage.env.example configs\storage.env
+Copy-Item configs\.env.example .env
+# Edit configs/storage.env and set STORAGE_ROOT_FOLDER_ID to your VISTA MVTEC3D folder ID
+
+# 3. Start PostgreSQL operational metadata store
+docker compose up -d postgres
+
+# 4. Verify storage confinement & initialize database schema
+.\.venv\Scripts\python.exe -m vista check-storage
+.\.venv\Scripts\python.exe -m vista init-db
+
+# 5. Inspect official MVTec 3D-AD catalog (does NOT download data automatically)
+.\.venv\Scripts\python.exe -m vista catalog --probe
+
+# 6. Run the full end-to-end Prefect pipeline for a single category
+.\.venv\Scripts\python.exe -m vista run-category cable_gland
+
+# 7. Run unit and integration tests
+.\.venv\Scripts\python.exe -m pytest -v
+```
+
+---
+
+## 5. Repository Structure
+
+```text
+VISTA/
+├── configs/
+│   ├── vista.yaml                # Official MVTec 3D-AD catalog, validation & preprocessing configs
+│   ├── storage.env.example       # Drive / S3 storage config template
+│   └── .env.example              # PostgreSQL & MLflow env template
+├── src/
+│   ├── storage.py                # Backward-compatible storage facade
+│   └── vista/
+│       ├── config.py             # Configuration & config-hash loader
+│       ├── logging.py            # Structured logging (structlog)
+│       ├── cli.py                # CLI (`python -m vista ...`)
+│       ├── storage/              # Path validation, StorageBackend ABC, Rclone & Local backends
+│       ├── metadata/             # PostgreSQL SQLAlchemy schema & idempotent repository
+│       ├── ingestion/            # Official catalog, resumable Range downloader, Bronze ingestor
+│       ├── validation/           # Multimodal RGB/XYZ/GT rules, duplicate & leakage detector
+│       ├── quality/              # RGB & 3D quality metrics + robust unsupervised outlier flags
+│       ├── preprocessing/        # Deterministic XYZ -> depth & normal Silver transforms
+│       ├── analytics/            # Gold Parquet publisher, dbt/DuckDB runner, EDA reports, MLflow hook
+│       └── orchestration/        # Prefect dependent pipeline flows & tasks
+├── dbt/                          # DuckDB dbt project (staging, core dim/fct, marts, data tests)
+├── analytics/
+│   ├── questions.md              # Analytical questions catalog
+│   ├── sql/                      # 10 executable analytical SQL queries
+│   ├── reports/                  # Generated EDA & Data Quality Markdown reports
+│   └── figures/                  # Generated matplotlib EDA figures
+├── docs/
+│   ├── architecture.md           # System & Medallion architecture overview
+│   ├── quality_metrics.md        # Mathematical definitions & limitations of quality metrics
+│   └── storage_s3_migration.md   # Drive safeguards & AWS S3 migration guide
+├── scripts/
+│   ├── storage.sh                # Workspace-confined rclone shell helper
+│   └── run_pipeline.py           # CLI launcher
+├── tests/
+│   ├── unit/                     # Storage, validation, quality, transform, catalog tests
+│   └── integration/              # Full synthetic E2E pipeline + live Google Drive workspace tests
+├── compose.yaml                  # PostgreSQL 16 + optional MLflow server
+└── pyproject.toml
+```
+
+---
+
+## 6. Current Development Status
+
+### Implemented & Verified
+- Workspace-confined Google Drive storage backend (`gdrive:VISTA MVTEC3D/`) with S3-portable interface and Bronze immutability checks.
+- Category-by-category resumable ingestion from official MVTec 3D-AD archives (`CC BY-NC-SA 4.0`).
+- Multimodal RGB/XYZ/GT validation (respecting official `class_ids.json` defect encodings), exact/near-duplicate checks, cross-split leakage checks, and quarantine manifests.
+- Deterministic Bronze-to-Silver depth & surface normal generation with byte-identical SHA-256 checksums, per-split `.tar` shards, and Bronze-to-Silver lineage tracking.
+- Unsupervised RGB & 3D data quality extraction with split-stratified robust MAD outlier flagging.
+- PostgreSQL operational metadata & stage-checkpoint persistence + Gold Parquet publishing with label-isolated `training_ready_samples.parquet`.
+- DuckDB + `dbt` analytical warehouse (`dim_*`, `fct_*`, `mart_*`), automated dbt tests, 10 analytical SQL queries, and reproducible EDA reports/figures.
+- Prefect workflow orchestration and MLflow dataset-snapshot logging hook (`sqlite:///mlruns/mlflow.db`).
+- **Verified Real-Dataset Coverage:** `cable_gland` (354 samples: 223 `train`, 23 `validation`, 108 `test` across `good`, `bent`, `cut`, `hole`, `thread`; 253 `PASS`, 101 `WARN` perceptual near-duplicates under fixed lighting, 0 `QUARANTINE`, 0 `FAIL`, 0 cross-split leaks; 246 label-isolated training-ready samples; 354/354 reliable Silver surface normals). See [analytics/reports/eda_report.md](analytics/reports/eda_report.md) and [analytics/reports/data_quality_report.md](analytics/reports/data_quality_report.md).
+
+### Planned ML Research Components (Not Yet Implemented)
+- Quality-aware RGB + 3D multimodal feature extraction and adaptive fusion architectures.
+- Self-supervised / memory-bank / teacher-student anomaly detection baselines trained strictly on `mart_training_ready_samples` (`train`/`validation` splits only).
+- Pixel- and image-level AUROC / PRO evaluation harness on held-out MVTec 3D-AD `test` ground-truth masks.
+- Full-dataset multi-category ingestion across all 10 MVTec 3D-AD categories (requires explicit storage/bandwidth authorization).
+
+---
+
+## 7. Dataset License & Attribution
+
+This project uses the **MVTec 3D-AD** dataset, licensed under **Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International (CC BY-NC-SA 4.0)** for non-commercial academic/research use only:
+
+> Bergmann, P., Jin, X., Sattlegger, D., & Steger, C. (2022). *The MVTec 3D-AD Dataset for Unsupervised 3D Anomaly Detection and Localization*. VISAPP 2022.

@@ -1,0 +1,36 @@
+version: 2
+
+models:
+  - name: dim_category
+    columns:
+      - name: category_name
+        tests: [unique, not_null]
+  - name: dim_sample
+    columns:
+      - name: sample_pk
+        tests: [unique, not_null]
+      - name: sample_key
+        tests: [unique, not_null]
+  - name: fct_data_quality
+    columns:
+      - name: metric_id
+        tests: [unique, not_null]
+      - name: sample_pk
+        tests:
+          - not_null
+          - relationships:
+              to: ref('dim_sample')
+              field: sample_pk
+  - name: fct_ingestion_runs
+    columns:
+      - name: stage_run_id
+        tests: [unique, not_null]
+  - name: fct_validation_results
+    columns:
+      - name: validation_id
+        tests: [unique, not_null]
+      - name: status
+        tests:
+          - not_null
+          - accepted_values:
+              values: ["PASS", "WARN", "QUARANTINE", "FAIL"]

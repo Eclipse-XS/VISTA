@@ -1,0 +1,21 @@
+SELECT
+    sample_pk,
+    sample_key,
+    dataset_version,
+    category_name,
+    split,
+    defect_type,
+    is_anomalous_benchmark,
+    sample_id,
+    rgb_relpath,
+    xyz_relpath,
+    gt_relpath,
+    rgb_sha256,
+    xyz_sha256,
+    gt_sha256,
+    rgb_size_bytes,
+    xyz_size_bytes,
+    gt_size_bytes,
+    bronze_archive_id,
+    CAST(discovered_at AS TIMESTAMPTZ) AS discovered_at
+FROM read_parquet('{{ env_var("VISTA_GOLD_DIR") }}/samples.parquet')
