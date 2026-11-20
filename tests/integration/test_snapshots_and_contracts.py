@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shutil
+from dataclasses import replace
 import tarfile
 from pathlib import Path
 
@@ -241,3 +242,48 @@ def test_snapshot_immutability_idempotency_interruption_recovery_and_loader(tmp_
     with pytest.raises(RemoteArtifactUnavailableError):
         _ = ds_train[0]
     silver_file.write_bytes(orig_bytes)
+
+
+def test_remote_gold_precommit_rejects_corrupted_object(tmp_path: Path) -> None:
+    """A partial/stale remote upload must never become a COMMITTED Gold snapshot."""
+    cfg, _, db, _ = _setup_mini_pipeline(tmp_path)
+
+    class CorruptingRemote(LocalStorageBackend):
+        def upload_directory(
+            self, local_dir: Path, dest_subpath: str, *, overwrite: bool = False
+        ) -> int:
+            uploaded = super().upload_directory(
+                local_dir, dest_subpath, overwrite=overwrite
+            )
+            if dest_subpath.startswith("gold/mvtec_3d_ad/snapshots/"):
+                # Simulate incorrect bytes left behind by an interrupted upload.
+                victim = self._resolve(f"{dest_subpath}/samples.parquet")
+                victim.write_bytes(b"stale-incomplete-parquet-upload")
+            return uploaded
+
+    remote = CorruptingRemote(Path(cfg.storage.root))
+    with pytest.raises(SnapshotImmutabilityError, match="Remote precommit"):
+        publish_gold_datasets(cfg=cfg, storage=remote, db=db, run_id="r1")
+
+    committed_manifests = list(
+        (remote.root_dir / "gold" / "mvtec_3d_ad" / "snapshots").rglob("manifest.json")
+    )
+    assert committed_manifests == []
+    assert not (
+        cfg.local_gold_dir / "mvtec_3d_ad" / "LATEST_SNAPSHOT.json"
+    ).exists()
+
+
+def test_remote_gold_precommit_sha256_readback_without_md5(tmp_path: Path) -> None:
+    """Remotes that cannot expose MD5 must be checked by downloaded SHA-256."""
+    cfg, _, db, _ = _setup_mini_pipeline(tmp_path)
+
+    class NoMd5Remote(LocalStorageBackend):
+        def stat(self, subpath: str):
+            info = super().stat(subpath)
+            return replace(info, md5=None) if info is not None and not info.is_dir else info
+
+    remote = NoMd5Remote(Path(cfg.storage.root))
+    snapshot = publish_gold_datasets(cfg=cfg, storage=remote, db=db, run_id="r1")
+    assert snapshot.status == "COMMITTED"
+    assert verify_snapshot_directory(snapshot.local_snapshot_dir).snapshot_id == snapshot.snapshot_id
