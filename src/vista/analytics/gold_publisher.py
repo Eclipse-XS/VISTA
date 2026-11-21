@@ -50,6 +50,7 @@ from vista.metadata.models import (
     ArtifactLineage,
     BronzeArchive,
     Category,
+    FileManifest,
     MLNormalizedFeature,
     NormalizationArtifact,
     PipelineRun,
@@ -62,6 +63,7 @@ from vista.metadata.models import (
 from vista.metadata.repository import MetadataRepository, SnapshotImmutabilityError
 from vista.storage.base import StorageBackend, md5_file, sha256_file
 from vista.storage.paths import (
+    bronze_archive_path,
     gold_latest_pointer_path,
     gold_snapshot_file_path,
     gold_snapshot_prefix,
@@ -363,20 +365,55 @@ def publish_gold_datasets(
         sr_orm = list(sess.execute(sr_stmt).scalars())
         table_rows["stage_runs"] = [_row_to_dict(r, GOLD_SCHEMAS["stage_runs"]) for r in sr_orm]
 
-        # Source archive provenance & category inventory
+        # Source archive provenance, Silver shard provenance & category inventory
         archives_orm = list(
             sess.execute(select(BronzeArchive).order_by(BronzeArchive.category_name)).scalars()
         )
-        source_archives = [
+        archive_rel_by_id: dict[int, str] = {}
+        archive_rel_by_cat: dict[str, str] = {}
+        source_archives = []
+        for a in archives_orm:
+            rel_p = bronze_archive_path(a.category_name, a.archive_filename)
+            archive_rel_by_id[a.archive_id] = rel_p
+            archive_rel_by_cat[a.category_name] = rel_p
+            source_archives.append(
+                {
+                    "category_name": a.category_name,
+                    "archive_filename": a.archive_filename,
+                    "relative_path": rel_p,
+                    "sha256": a.sha256,
+                    "md5": a.md5,
+                    "size_bytes": a.size_bytes,
+                    "remote_uri": a.remote_uri,
+                }
+            )
+
+        active_silver_prefix = (
+            f"silver/mvtec_3d_ad/{cfg.preprocessing.version}_{cfg.preprocessing.config_hash}/"
+        )
+        shard_manifests_orm = list(
+            sess.execute(
+                select(FileManifest)
+                .where(
+                    FileManifest.layer == "silver",
+                    FileManifest.modality.like("silver_shard_%"),
+                    FileManifest.status == "COMMITTED",
+                    FileManifest.relative_path.like(f"{active_silver_prefix}%"),
+                )
+                .order_by(FileManifest.category_name, FileManifest.modality)
+            ).scalars()
+        )
+        silver_shards = [
             {
-                "category_name": a.category_name,
-                "archive_filename": a.archive_filename,
-                "sha256": a.sha256,
-                "md5": a.md5,
-                "size_bytes": a.size_bytes,
-                "remote_uri": a.remote_uri,
+                "category_name": sm.category_name,
+                "split": sm.modality.removeprefix("silver_shard_"),
+                "relative_path": sm.relative_path,
+                "remote_uri": sm.remote_uri,
+                "size_bytes": sm.size_bytes,
+                "sha256": sm.sha256,
+                "md5": sm.md5,
             }
-            for a in archives_orm
+            for sm in shard_manifests_orm
         ]
 
         # Build strictly separated ML partitions:
@@ -462,6 +499,17 @@ def publish_gold_datasets(
                 "train_ref_geometry_outlier_flag": nf.train_ref_geometry_outlier_flag if nf else False,
             }
 
+            arch_rel = (
+                archive_rel_by_id.get(s.bronze_archive_id)
+                if s.bronze_archive_id is not None
+                else None
+            ) or archive_rel_by_cat.get(s.category_name)
+            shard_rel = (
+                sa_row.shard_relpath
+                or f"silver/mvtec_3d_ad/{sa_row.preprocessing_version}_{sa_row.config_hash}/{s.category_name}/shards/{s.split}.tar"
+            )
+            member_rel = sa_row.shard_member_path or f"{s.defect_type}/{s.sample_id}.npz"
+
             if s.split in ("train", "validation"):
                 train_rows.append(
                     {
@@ -474,11 +522,14 @@ def publish_gold_datasets(
                         "sample_id": s.sample_id,
                         "rgb_relpath": s.rgb_relpath,
                         "rgb_sha256": s.rgb_sha256,
+                        "bronze_archive_relpath": arch_rel,
                         "validation_status": vr.status,
                         "preprocessing_version": sa_row.preprocessing_version,
                         "config_hash": sa_row.config_hash,
                         "silver_relpath": sa_row.depth_relpath,
                         "silver_remote_uri": sa_row.depth_remote_uri,
+                        "silver_shard_relpath": shard_rel,
+                        "silver_member_path": member_rel,
                         "silver_sha256": sa_row.depth_sha256,
                         "normal_reliable": sa_row.normal_reliable,
                         "rgb_brightness_mean": qm.rgb_brightness_mean if qm else None,
@@ -503,6 +554,7 @@ def publish_gold_datasets(
                         "is_anomalous_benchmark": s.is_anomalous_benchmark,
                         "rgb_relpath": s.rgb_relpath,
                         "rgb_sha256": s.rgb_sha256,
+                        "bronze_archive_relpath": arch_rel,
                         "gt_relpath": s.gt_relpath,
                         "gt_sha256": s.gt_sha256,
                         "validation_status": vr.status,
@@ -510,6 +562,8 @@ def publish_gold_datasets(
                         "config_hash": sa_row.config_hash,
                         "silver_relpath": sa_row.depth_relpath,
                         "silver_remote_uri": sa_row.depth_remote_uri,
+                        "silver_shard_relpath": shard_rel,
+                        "silver_member_path": member_rel,
                         "silver_sha256": sa_row.depth_sha256,
                         "normal_reliable": sa_row.normal_reliable,
                         **shared_ml_norm,
@@ -690,6 +744,7 @@ def publish_gold_datasets(
             "sample_count": sample_count,
             "train_manifest_hashes": train_manifest_hashes,
             "source_archives": source_archives,
+            "silver_shards": silver_shards,
             "schemas_sha256": schemas_sha,
             "artifacts": {
                 r.table_name: {

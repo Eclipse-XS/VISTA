@@ -7,6 +7,8 @@ SELECT
     config_json,
     depth_relpath,
     depth_remote_uri,
+    shard_relpath,
+    shard_member_path,
     depth_sha256,
     depth_size_bytes,
     normal_relpath,

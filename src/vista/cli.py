@@ -124,17 +124,43 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "publish-gold":
+        from vista.metadata.repository import MetadataRepository
+
         engine = create_db_engine(cfg.database)
         init_db(engine)
         db = DatabaseSessionManager(engine)
         storage = build_storage_backend(cfg.storage)
-        snapshot = publish_gold_datasets(
-            cfg=cfg,
-            storage=storage,
-            db=db,
-            run_id="manual-publish-gold",
-            upload_to_remote=not args.no_upload,
-        )
+        with db.session() as sess:
+            repo = MetadataRepository(sess)
+            run = repo.start_pipeline_run(
+                flow_name="manual-publish-gold",
+                category_name="all",
+                dataset_version=cfg.dataset_version,
+                preprocessing_version=cfg.preprocessing.version,
+                config=cfg.preprocessing.canonical_dict(),
+            )
+            run_id = run.run_id
+            stage = repo.start_stage_run(run_id, "publish_gold", "all")
+            stage_id = stage.stage_run_id
+        try:
+            snapshot = publish_gold_datasets(
+                cfg=cfg,
+                storage=storage,
+                db=db,
+                run_id=run_id,
+                upload_to_remote=not args.no_upload,
+                exclude_in_flight_stage_run_id=stage_id,
+            )
+        except Exception as exc:
+            with db.session() as sess:
+                repo = MetadataRepository(sess)
+                repo.finish_stage_run(stage_id, "FAILED", error_message=str(exc))
+                repo.finish_pipeline_run(run_id, "FAILED", error_message=str(exc))
+            raise
+        with db.session() as sess:
+            repo = MetadataRepository(sess)
+            repo.finish_stage_run(stage_id, "SUCCEEDED", items_processed=len(snapshot.tables))
+            repo.finish_pipeline_run(run_id, "SUCCEEDED")
         print(json.dumps(asdict(snapshot), indent=2, default=str))
         return 0
 

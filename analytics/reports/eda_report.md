@@ -1,9 +1,9 @@
 # VISTA — Exploratory Data Analysis Report (MVTec 3D-AD)
 
-- **Generated (UTC):** `2026-11-21T08:57:26.007599+00:00`
-- **Immutable Gold Snapshot ID:** `snap_1_0_0_silver_v1_172131d3_0233fc000ae3`
-- **Snapshot Manifest SHA-256:** `8a7e18362818b94bab2dda258802e1495a879e85160d518487e4634f272187f7`
-- **Telemetry Cutoff (UTC):** `2026-11-21T08:56:46.049560+00:00`
+- **Generated (UTC):** `2026-11-21T10:13:55.149311+00:00`
+- **Immutable Gold Snapshot ID:** `snap_1_0_0_silver_v1_172131d3_a3cd04efd735`
+- **Snapshot Manifest SHA-256:** `1c50ca3d4956c6fc1c024d4a9ea7126c14364687c909fedc155d2fc5061b2440`
+- **Telemetry Cutoff (UTC):** `2026-11-21T10:13:05.496583+00:00`
 - **Dataset:** `mvtec_3d_ad` version `1.0.0` (`CC BY-NC-SA 4.0 (Non-Commercial Academic/Research Use Only)`)
 - **Preprocessing Version:** `silver_v1` (config hash `172131d30e11d64f`)
 - **Ingested Categories Covered (3 of 10):** `cable_gland, cookie, dowel`
@@ -473,7 +473,7 @@ Source SQL: `analytics/sql/07_pipeline_performance.sql`
 
 | stage_name | total_attempts | logical_runs | succeeded_attempts | failed_attempts | interrupted_attempts | in_progress_attempts | retried_attempts | total_observed_duration_s | avg_succeeded_duration_s | max_succeeded_duration_s | succeeded_items_processed | succeeded_items_per_sec |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| publish_gold | 10 | 6 | 4 | 5 | 1 | 0 | 4 | 2023.3900 | 376.2140 | 830.1150 | 45 | 0.0300 |
+| publish_gold | 11 | 7 | 5 | 5 | 1 | 0 | 4 | 2302.4030 | 356.7740 | 830.1150 | 57 | 0.0300 |
 | transform | 8 | 7 | 6 | 1 | 1 | 0 | 1 | 1676.7360 | 257.7710 | 604.5150 | 2231 | 1.4400 |
 | ingest | 8 | 7 | 7 | 1 | 0 | 0 | 1 | 1326.6140 | 119.4940 | 377.9810 | 2585 | 3.0900 |
 | validate | 7 | 7 | 7 | 0 | 0 | 0 | 0 | 525.3060 | 75.0440 | 174.3470 | 2585 | 4.9200 |

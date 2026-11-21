@@ -1,9 +1,10 @@
-"""Unit tests for fail-closed verified cache cleanup and foreground visual diagnostics."""
+"""Unit tests for fail-closed verified cache cleanup, archive security, and foreground visual diagnostics."""
 
 from __future__ import annotations
 
 import hashlib
 import json
+import tarfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -24,9 +25,12 @@ from vista.config import (
 from vista.metadata.database import DatabaseSessionManager, create_db_engine, init_db
 from vista.metadata.models import BronzeArchive, FileManifest, GoldSnapshot, QualityMetric, Sample
 from vista.storage import (
+    ArchiveSecurityError,
     CacheCleanupVerificationError,
+    IndexedTarShard,
     LocalStorageBackend,
     cleanup_verified_category_cache,
+    validate_archive_member_path,
 )
 from vista.storage.paths import bronze_archive_path, gold_snapshot_file_path
 
@@ -68,6 +72,8 @@ def _stage_verified_remote_and_local(
     storage: LocalStorageBackend,
     db: DatabaseSessionManager,
     snap_id: str,
+    *,
+    snapshot_categories: list[str] | None = None,
 ) -> tuple[Path, str]:
     # Local cache files
     local_archive = cfg.storage.local_cache_dir / "mvtec_3d_ad" / "archives" / "cookie.tar.xz"
@@ -94,21 +100,37 @@ def _stage_verified_remote_and_local(
     arch_rel = bronze_archive_path("cookie", "cookie.tar.xz")
     storage.upload_file(local_archive, arch_rel)
 
-    # Remote Silver split shards + metadata rows
+    # Remote Silver split shards + metadata rows (with both SHA-256 and MD5)
     shard_tmp = cfg.storage.local_cache_dir / "tmp_shards"
     shard_tmp.mkdir(parents=True, exist_ok=True)
-    shard_records: list[tuple[str, str, int, str]] = []
+    shard_records: list[tuple[str, str, int, str, str]] = []
     for split_name in ("train", "validation", "test"):
         shard = shard_tmp / f"{split_name}.tar"
-        payload = f"shard-{split_name}".encode()
+        payload = f"shard-{split_name}-payload".encode()
         shard.write_bytes(payload)
-        rel = f"silver/mvtec_3d_ad/{cfg.preprocessing.version}_{cfg.preprocessing.config_hash}/cookie/{split_name}.tar"
+        rel = (
+            f"silver/mvtec_3d_ad/{cfg.preprocessing.version}_{cfg.preprocessing.config_hash}"
+            f"/cookie/shards/{split_name}.tar"
+        )
         storage.upload_file(shard, rel)
-        shard_records.append((split_name, rel, len(payload), hashlib.sha256(payload).hexdigest()))
+        shard_records.append(
+            (
+                split_name,
+                rel,
+                len(payload),
+                hashlib.sha256(payload).hexdigest(),
+                hashlib.md5(payload).hexdigest(),
+            )
+        )
 
     # Remote Gold manifest
+    cats = snapshot_categories if snapshot_categories is not None else ["cookie"]
     manifest = shard_tmp / "manifest.json"
-    manifest.write_text(json.dumps({"snapshot_id": snap_id, "status": "COMMITTED"}), encoding="utf-8")
+    manifest_bytes = json.dumps(
+        {"snapshot_id": snap_id, "status": "COMMITTED", "categories": cats}, sort_keys=True
+    ).encode("utf-8")
+    manifest.write_bytes(manifest_bytes)
+    manifest_sha = hashlib.sha256(manifest_bytes).hexdigest()
     manifest_rel = gold_snapshot_file_path(snap_id, "manifest.json")
     storage.upload_file(manifest, manifest_rel)
 
@@ -127,7 +149,7 @@ def _stage_verified_remote_and_local(
                 status="VERIFIED",
             )
         )
-        for split_name, rel, sz, s256 in shard_records:
+        for split_name, rel, sz, s256, smd5 in shard_records:
             sess.add(
                 FileManifest(
                     layer="silver",
@@ -137,6 +159,7 @@ def _stage_verified_remote_and_local(
                     remote_uri=storage.full_uri(rel),
                     size_bytes=sz,
                     sha256=s256,
+                    md5=smd5,
                     status="COMMITTED",
                 )
             )
@@ -148,10 +171,11 @@ def _stage_verified_remote_and_local(
                 config_hash=cfg.preprocessing.config_hash,
                 data_content_digest="b" * 64,
                 status="COMMITTED",
+                categories_json=json.dumps(cats),
                 local_snapshot_dir=str(cfg.local_gold_dir / "mvtec_3d_ad" / "snapshots" / snap_id),
                 remote_prefix_uri=storage.full_uri(f"gold/mvtec_3d_ad/snapshots/{snap_id}"),
                 manifest_remote_uri=storage.full_uri(manifest_rel),
-                manifest_sha256="a" * 64,
+                manifest_sha256=manifest_sha,
                 sample_count=10,
                 committed_at=now,
             )
@@ -160,7 +184,7 @@ def _stage_verified_remote_and_local(
     return local_archive, arch_rel
 
 
-def test_cleanup_cache_fail_closed_when_remote_missing_and_succeeds_when_verified(tmp_path: Path) -> None:
+def test_cleanup_cache_fail_closed_checks_checksums_and_category_snapshot(tmp_path: Path) -> None:
     storage_root = tmp_path / "remote"
     storage = LocalStorageBackend(storage_root)
     cfg = _make_cfg(tmp_path, storage_root)
@@ -190,16 +214,36 @@ def test_cleanup_cache_fail_closed_when_remote_missing_and_succeeds_when_verifie
     # 3. Fail-closed if a Silver shard is missing
     shard_test_remote = (
         storage_root
-        / f"silver/mvtec_3d_ad/{cfg.preprocessing.version}_{cfg.preprocessing.config_hash}/cookie/test.tar"
+        / f"silver/mvtec_3d_ad/{cfg.preprocessing.version}_{cfg.preprocessing.config_hash}/cookie/shards/test.tar"
     )
     shard_bytes = shard_test_remote.read_bytes()
     shard_test_remote.unlink()
-    with pytest.raises(CacheCleanupVerificationError, match="Silver shard missing"):
+    with pytest.raises(CacheCleanupVerificationError, match="Silver shard .* missing"):
         cleanup_verified_category_cache(cfg=cfg, storage=storage, db=db, category="cookie")
     assert (cfg.local_bronze_dir / "mvtec_3d_ad" / "cookie").exists()
+
+    # 4. Fail-closed if a Silver shard has SAME BYTE SIZE but CORRUPTED CONTENT (checksum mismatch!)
+    corrupted_same_len = b"X" * len(shard_bytes)
+    shard_test_remote.write_bytes(corrupted_same_len)
+    with pytest.raises(CacheCleanupVerificationError, match="MD5 mismatch|SHA-256 mismatch"):
+        cleanup_verified_category_cache(cfg=cfg, storage=storage, db=db, category="cookie")
+    assert local_archive.exists()
     shard_test_remote.write_bytes(shard_bytes)
 
-    # 4. Dry-run verifies everything but deletes nothing
+    # 5. Fail-closed if committed Gold snapshot does NOT include this category
+    with db.session() as sess:
+        snap_row = sess.get(GoldSnapshot, snap_id)
+        assert snap_row is not None
+        snap_row.categories_json = json.dumps(["cable_gland"])
+    with pytest.raises(CacheCleanupVerificationError, match="covering category 'cookie'"):
+        cleanup_verified_category_cache(cfg=cfg, storage=storage, db=db, category="cookie")
+    assert local_archive.exists()
+    with db.session() as sess:
+        snap_row = sess.get(GoldSnapshot, snap_id)
+        assert snap_row is not None
+        snap_row.categories_json = json.dumps(["cookie"])
+
+    # 6. Dry-run verifies everything but deletes nothing
     dry = cleanup_verified_category_cache(cfg=cfg, storage=storage, db=db, category="cookie", dry_run=True)
     assert dry.dry_run is True
     assert dry.reclaimed_bytes > 0
@@ -207,7 +251,7 @@ def test_cleanup_cache_fail_closed_when_remote_missing_and_succeeds_when_verifie
     assert local_archive.exists()
     assert (cfg.local_bronze_dir / "mvtec_3d_ad" / "cookie").exists()
 
-    # 5. Live cleanup reclaims archive, bronze, and silver while leaving remote untouched
+    # 7. Live cleanup reclaims archive, bronze, and silver while leaving remote untouched
     res = cleanup_verified_category_cache(cfg=cfg, storage=storage, db=db, category="cookie")
     assert res.dry_run is False
     assert res.reclaimed_bytes > 0
@@ -218,6 +262,23 @@ def test_cleanup_cache_fail_closed_when_remote_missing_and_succeeds_when_verifie
         cfg.local_silver_dir / "mvtec_3d_ad" / f"{cfg.preprocessing.version}_{cfg.preprocessing.config_hash}" / "cookie"
     ).exists()
     assert (storage_root / arch_rel).exists()
+
+
+def test_archive_member_path_security_blocks_traversal_and_symlinks(tmp_path: Path) -> None:
+    for bad in ("../evil.npz", "good/../../etc/passwd", "/abs/path.npz", "C:/win/path.npz", "a\\b.npz", ""):
+        with pytest.raises(ArchiveSecurityError):
+            validate_archive_member_path(bad)
+    assert validate_archive_member_path("./good/000.npz") == "good/000.npz"
+
+    # Tar containing a symlink must be rejected on shard indexing
+    malicious_tar = tmp_path / "symlink.tar"
+    with tarfile.open(malicious_tar, "w") as tf:
+        ti = tarfile.TarInfo("good/evil_link.npz")
+        ti.type = tarfile.SYMTYPE
+        ti.linkname = "/etc/passwd"
+        tf.addfile(ti)
+    with pytest.raises(ArchiveSecurityError, match="Unsafe member"):
+        IndexedTarShard(malicious_tar)
 
 
 def test_visual_diagnostics_generates_png_and_json(tmp_path: Path) -> None:

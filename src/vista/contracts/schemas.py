@@ -11,21 +11,22 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from vista.storage.base import sha256_file
+from vista.storage.base import (
+    CorruptedCacheError as CorruptedCacheError,
+)
+from vista.storage.base import (
+    RemoteArtifactUnavailableError as RemoteArtifactUnavailableError,
+)
+from vista.storage.base import (
+    sha256_file,
+)
 
-CONTRACT_VERSION = "contracts_v1"
+CONTRACT_VERSION = "contracts_v2"
+LEGACY_CONTRACT_VERSION = "contracts_v1"
 
 
 class DataContractViolationError(ValueError):
     """Raised when a Bronze, Silver, or Gold artifact violates its explicit data contract."""
-
-
-class CorruptedCacheError(RuntimeError):
-    """Raised when a local cached file fails checksum verification or decoding."""
-
-
-class RemoteArtifactUnavailableError(RuntimeError):
-    """Raised when a required remote artifact cannot be located or fetched."""
 
 
 GOLD_SCHEMAS: dict[str, pa.Schema] = {
@@ -223,6 +224,8 @@ GOLD_SCHEMAS: dict[str, pa.Schema] = {
             ("config_json", pa.string()),
             ("depth_relpath", pa.string()),
             ("depth_remote_uri", pa.string()),
+            ("shard_relpath", pa.string()),
+            ("shard_member_path", pa.string()),
             ("depth_sha256", pa.string()),
             ("depth_size_bytes", pa.int64()),
             ("normal_relpath", pa.string()),
@@ -301,11 +304,14 @@ GOLD_SCHEMAS: dict[str, pa.Schema] = {
             ("sample_id", pa.string()),
             ("rgb_relpath", pa.string()),
             ("rgb_sha256", pa.string()),
+            ("bronze_archive_relpath", pa.string()),
             ("validation_status", pa.string()),
             ("preprocessing_version", pa.string()),
             ("config_hash", pa.string()),
             ("silver_relpath", pa.string()),
             ("silver_remote_uri", pa.string()),
+            ("silver_shard_relpath", pa.string()),
+            ("silver_member_path", pa.string()),
             ("silver_sha256", pa.string()),
             ("normal_reliable", pa.bool_()),
             ("norm_artifact_id", pa.int64()),
@@ -349,6 +355,7 @@ GOLD_SCHEMAS: dict[str, pa.Schema] = {
             ("is_anomalous_benchmark", pa.bool_()),
             ("rgb_relpath", pa.string()),
             ("rgb_sha256", pa.string()),
+            ("bronze_archive_relpath", pa.string()),
             ("gt_relpath", pa.string()),
             ("gt_sha256", pa.string()),
             ("validation_status", pa.string()),
@@ -356,6 +363,8 @@ GOLD_SCHEMAS: dict[str, pa.Schema] = {
             ("config_hash", pa.string()),
             ("silver_relpath", pa.string()),
             ("silver_remote_uri", pa.string()),
+            ("silver_shard_relpath", pa.string()),
+            ("silver_member_path", pa.string()),
             ("silver_sha256", pa.string()),
             ("normal_reliable", pa.bool_()),
             ("norm_artifact_id", pa.int64()),
@@ -380,6 +389,31 @@ GOLD_SCHEMAS: dict[str, pa.Schema] = {
 }
 
 
+# Preserve exact contracts_v1 schemas so previously committed immutable snapshots remain verifiable
+_V2_ONLY_FIELDS: dict[str, set[str]] = {
+    "silver_artifacts": {"shard_relpath", "shard_member_path"},
+    "training_ready_samples": {"bronze_archive_relpath", "silver_shard_relpath", "silver_member_path"},
+    "evaluation_samples": {"bronze_archive_relpath", "silver_shard_relpath", "silver_member_path"},
+}
+
+GOLD_SCHEMAS_V1: dict[str, pa.Schema] = {
+    name: pa.schema([f for f in schema if f.name not in _V2_ONLY_FIELDS.get(name, set())])
+    for name, schema in GOLD_SCHEMAS.items()
+}
+
+GOLD_SCHEMAS_BY_VERSION: dict[str, dict[str, pa.Schema]] = {
+    LEGACY_CONTRACT_VERSION: GOLD_SCHEMAS_V1,
+    CONTRACT_VERSION: GOLD_SCHEMAS,
+}
+
+
+def get_gold_schemas(contract_version: str | None = None) -> dict[str, pa.Schema]:
+    ver = contract_version or CONTRACT_VERSION
+    if ver not in GOLD_SCHEMAS_BY_VERSION:
+        raise DataContractViolationError(f"Unsupported Gold contract_version: {ver!r}")
+    return GOLD_SCHEMAS_BY_VERSION[ver]
+
+
 @dataclass(frozen=True)
 class SnapshotVerificationResult:
     snapshot_id: str
@@ -389,14 +423,20 @@ class SnapshotVerificationResult:
     manifest_sha256: str
 
 
-def validate_parquet_file_contract(path: Path, table_name: str) -> int:
+def validate_parquet_file_contract(
+    path: Path,
+    table_name: str,
+    *,
+    contract_version: str | None = None,
+) -> int:
     """Validate that a Parquet file is readable, non-corrupted, and matches its exact Gold schema."""
-    if table_name not in GOLD_SCHEMAS:
+    schemas = get_gold_schemas(contract_version)
+    if table_name not in schemas:
         raise DataContractViolationError(f"Unknown Gold contract table: {table_name!r}")
     if not path.is_file():
         raise DataContractViolationError(f"Missing Parquet artifact for {table_name!r}: {path}")
 
-    expected_schema = GOLD_SCHEMAS[table_name]
+    expected_schema = schemas[table_name]
     try:
         pf = pq.ParquetFile(path)
         actual_schema = pf.schema_arrow
@@ -514,11 +554,15 @@ def verify_snapshot_directory(snapshot_dir: Path) -> SnapshotVerificationResult:
     if schemas_expected_sha and sha256_file(schemas_path) != schemas_expected_sha:
         raise DataContractViolationError("Snapshot schemas.json SHA-256 mismatch")
 
+    manifest_contract_ver = str(manifest.get("contract_version") or LEGACY_CONTRACT_VERSION)
+
     total_rows = 0
     verified_tables = 0
     for table_name, meta in artifacts.items():
         pq_path = snapshot_dir / f"{table_name}.parquet"
-        actual_rows = validate_parquet_file_contract(pq_path, table_name)
+        actual_rows = validate_parquet_file_contract(
+            pq_path, table_name, contract_version=manifest_contract_ver
+        )
         if actual_rows != int(meta["row_count"]):
             raise DataContractViolationError(
                 f"Row count mismatch for {table_name!r}: manifest={meta['row_count']}, actual={actual_rows}"

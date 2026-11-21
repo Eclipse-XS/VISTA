@@ -20,7 +20,7 @@ from vista.preprocessing.transforms import (
     save_normal_preview_png,
     xyz_to_depth_and_normals,
 )
-from vista.storage.base import StorageBackend, sha256_file
+from vista.storage.base import StorageBackend, md5_file, sha256_file
 from vista.storage.paths import validate_workspace_path
 from vista.validation.rules import load_xyz_tiff
 
@@ -150,13 +150,19 @@ def transform_category_to_silver(
 
         sample_rel = f"{s.split}/{s.defect_type}/{s.sample_id}.npz"
         local_npz = silver_local_root / sample_rel
-        remote_npz_rel = validate_workspace_path(f"{silver_rel_prefix}/{sample_rel}")
+        local_bundle_rel = validate_workspace_path(f"{silver_rel_prefix}/{sample_rel}")
+        shard_rel = validate_workspace_path(f"{silver_rel_prefix}/shards/{s.split}.tar")
+        member_rel = f"{s.defect_type}/{s.sample_id}.npz"
+        addressable_remote_uri = f"{storage.full_uri(shard_rel)}#{member_rel}"
 
-        # Checkpoint check: skip if already generated with matching checksum
+        # Checkpoint check: skip if already generated with matching checksum and addressable shard URI
         prev = existing_silver.get(s.sample_pk)
         if (
             prev is not None
             and prev.status == "SUCCEEDED"
+            and prev.shard_relpath == shard_rel
+            and prev.shard_member_path == member_rel
+            and prev.depth_remote_uri == addressable_remote_uri
             and local_npz.is_file()
             and sha256_file(local_npz) == prev.depth_sha256
         ):
@@ -209,7 +215,6 @@ def transform_category_to_silver(
         source_uri = (
             f"{arch.remote_uri}#{s.xyz_relpath}" if arch is not None else f"bronze://{s.xyz_relpath}"
         )
-        remote_uri = storage.full_uri(remote_npz_rel)
 
         batch_records.append(
             {
@@ -219,17 +224,19 @@ def transform_category_to_silver(
                     "preprocessing_version": prep.version,
                     "config_hash": cfg_hash,
                     "config_json": cfg_json,
-                    "depth_relpath": remote_npz_rel,
-                    "depth_remote_uri": remote_uri,
+                    "depth_relpath": local_bundle_rel,
+                    "depth_remote_uri": addressable_remote_uri,
+                    "shard_relpath": shard_rel,
+                    "shard_member_path": member_rel,
                     "depth_sha256": npz_sha,
                     "depth_size_bytes": npz_size,
-                    "normal_relpath": remote_npz_rel if out.normals is not None else None,
-                    "normal_remote_uri": remote_uri if out.normals is not None else None,
+                    "normal_relpath": local_bundle_rel if out.normals is not None else None,
+                    "normal_remote_uri": addressable_remote_uri if out.normals is not None else None,
                     "normal_sha256": npz_sha if out.normals is not None else None,
                     "normal_size_bytes": npz_size if out.normals is not None else None,
                     "normal_valid_ratio": out.normal_valid_ratio,
                     "normal_reliable": out.normal_reliable,
-                    "valid_mask_relpath": remote_npz_rel,
+                    "valid_mask_relpath": local_bundle_rel,
                     "valid_mask_sha256": npz_sha,
                     "spatial_alignment_verified": aligned,
                     "status": "SUCCEEDED",
@@ -239,8 +246,8 @@ def transform_category_to_silver(
                     "category_name": category,
                     "layer": "silver",
                     "modality": "depth_normals_bundle",
-                    "relative_path": remote_npz_rel,
-                    "remote_uri": remote_uri,
+                    "relative_path": local_bundle_rel,
+                    "remote_uri": addressable_remote_uri,
                     "size_bytes": npz_size,
                     "sha256": npz_sha,
                     "md5": None,
@@ -253,7 +260,7 @@ def transform_category_to_silver(
                     "source_uri": source_uri,
                     "source_sha256": s.xyz_sha256 or "",
                     "target_layer": "silver",
-                    "target_uri": remote_uri,
+                    "target_uri": addressable_remote_uri,
                     "target_sha256": npz_sha,
                     "transformation_name": "xyz_to_depth_and_normals",
                     "transformation_version": prep.version,
@@ -280,6 +287,7 @@ def transform_category_to_silver(
         if n_members > 0:
             shard_rel = validate_workspace_path(f"{silver_rel_prefix}/shards/{split_name}.tar")
             shard_sha = sha256_file(shard_local)
+            shard_md5 = md5_file(shard_local)
             shard_sz = shard_local.stat().st_size
             if upload_to_remote:
                 log.info(
@@ -295,6 +303,8 @@ def transform_category_to_silver(
                 "members": n_members,
                 "size_bytes": shard_sz,
                 "sha256": shard_sha,
+                "md5": shard_md5,
+                "relative_path": shard_rel,
                 "remote_uri": shard_uri,
             }
             with db.session() as sess:
@@ -307,7 +317,7 @@ def transform_category_to_silver(
                     remote_uri=shard_uri,
                     size_bytes=shard_sz,
                     sha256=shard_sha,
-                    md5=None,
+                    md5=shard_md5,
                     status="COMMITTED",
                     run_id=run_id,
                 )

@@ -4,18 +4,24 @@ Works with pure Python/NumPy/PyArrow (no PyTorch dependency required yet) and
 exposes standard `__len__` / `__getitem__` indexing suitable for direct wrapping
 in `torch.utils.data.DataLoader` during future ML research.
 
-Safety guarantees:
+Safety & recovery guarantees:
 - Partition `train` and `validation` read ONLY `training_ready_samples.parquet`.
 - Requesting `include_benchmark_labels=True` on `train` or `validation` raises
   `DataLeakageError`.
 - Partition `test` reads ONLY `evaluation_samples.parquet`.
-- Verifies SHA-256 checksums on cached RGB and Silver `.npz` files before
-  returning data, raising `CorruptedCacheError` or `RemoteArtifactUnavailableError`
-  instead of silently returning corrupted tensors.
+- When local Bronze or Silver files are absent (e.g., after verified local cache
+  cleanup) and a `storage_backend` is configured, deterministically restores RGB,
+  optional test GT masks, and Silver depth/normals/valid_mask bundles from durable
+  remote Bronze archives and Silver per-split `.tar` shards using safe path-validated
+  extraction and SHA-256 verification.
+- Verifies SHA-256 checksums on cached and restored files before returning tensors,
+  raising `CorruptedCacheError` or `RemoteArtifactUnavailableError` instead of
+  silently returning corrupted data.
 """
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -27,12 +33,12 @@ import pyarrow.parquet as pq
 from vista.contracts.schemas import (
     CorruptedCacheError,
     DataContractViolationError,
-    RemoteArtifactUnavailableError,
     validate_silver_npz_contract,
     verify_snapshot_directory,
 )
 from vista.quality.normalization import DataLeakageError
-from vista.storage.base import StorageBackend, sha256_file
+from vista.storage.base import StorageBackend
+from vista.storage.recovery import ArtifactRecoveryManager
 
 ML_FEATURE_COLUMNS: tuple[str, ...] = (
     "norm_fg_rgb_brightness",
@@ -78,6 +84,9 @@ class VistaMultimodalDataset:
         include_benchmark_labels: bool = False,
         storage_backend: StorageBackend | None = None,
         verify_checksums: bool = True,
+        local_cache_dir: Path | None = None,
+        hydrate_mode: str = "on_demand",
+        keep_downloaded_archives: bool = False,
     ) -> None:
         if partition not in ("train", "validation", "test"):
             raise ValueError(f"Invalid partition {partition!r}; expected 'train', 'validation', or 'test'")
@@ -85,18 +94,38 @@ class VistaMultimodalDataset:
             raise DataLeakageError(
                 f"Benchmark test labels cannot be requested for partition={partition!r}"
             )
+        if hydrate_mode not in ("on_demand", "category"):
+            raise ValueError(f"Invalid hydrate_mode {hydrate_mode!r}; expected 'on_demand' or 'category'")
 
         self.snapshot_dir = snapshot_dir.resolve()
         self.local_bronze_root = local_bronze_root.resolve()
         self.local_silver_root = local_silver_root.resolve()
+        self.local_cache_dir = (
+            local_cache_dir.resolve()
+            if local_cache_dir is not None
+            else (self.local_bronze_root.parent / "cache").resolve()
+        )
         self.partition = partition
         self.category = category
         self.include_benchmark_labels = include_benchmark_labels
         self.storage_backend = storage_backend
         self.verify_checksums = verify_checksums
+        self.hydrate_mode = hydrate_mode
 
         # Verify committed snapshot manifest & Parquet contracts upfront
         self.verification = verify_snapshot_directory(self.snapshot_dir)
+        self._manifest: dict[str, Any] = json.loads(
+            (self.snapshot_dir / "manifest.json").read_text(encoding="utf-8")
+        )
+        self._recovery = ArtifactRecoveryManager(
+            local_bronze_root=self.local_bronze_root,
+            local_silver_root=self.local_silver_root,
+            local_cache_dir=self.local_cache_dir,
+            storage_backend=self.storage_backend,
+            snapshot_manifest=self._manifest,
+            verify_checksums=self.verify_checksums,
+            keep_downloaded_archives=keep_downloaded_archives,
+        )
 
         table_name = (
             "training_ready_samples" if partition in ("train", "validation") else "evaluation_samples"
@@ -110,6 +139,9 @@ class VistaMultimodalDataset:
         ]
         self._records.sort(key=lambda r: r["sample_key"])
 
+        if self.hydrate_mode == "category" and self.storage_backend is not None:
+            self.hydrate()
+
     @property
     def snapshot_id(self) -> str:
         return self.verification.snapshot_id
@@ -117,48 +149,67 @@ class VistaMultimodalDataset:
     def __len__(self) -> int:
         return len(self._records)
 
-    def _resolve_bronze_file(self, category: str, relpath: str, expected_sha256: str | None) -> Path:
-        candidates = [
-            self.local_bronze_root / "mvtec_3d_ad" / category / category / relpath,
-            self.local_bronze_root / "mvtec_3d_ad" / category / relpath,
-        ]
-        found = next((p for p in candidates if p.is_file()), None)
-        if found is None:
-            raise RemoteArtifactUnavailableError(
-                f"Bronze file {relpath!r} for category {category!r} not present in local cache "
-                f"under {self.local_bronze_root}"
-            )
-        if self.verify_checksums and expected_sha256:
-            actual = sha256_file(found)
-            if actual != expected_sha256:
-                raise CorruptedCacheError(
-                    f"Corrupted local Bronze cache file {found}: expected={expected_sha256}, actual={actual}"
+    def hydrate(self, *, include_xyz: bool = False) -> list[dict[str, Any]]:
+        """Explicitly hydrate Bronze RGB/GT and Silver shards for this dataset's categories & partition."""
+        cats = sorted({str(r["category_name"]) for r in self._records})
+        summaries: list[dict[str, Any]] = []
+        include_gt = self.partition == "test" and self.include_benchmark_labels
+        for cat in cats:
+            summaries.append(
+                self._recovery.hydrate_category(
+                    category=cat,
+                    splits=(self.partition,),
+                    include_gt=include_gt,
+                    include_xyz=include_xyz,
                 )
-        return found
+            )
+        return summaries
+
+    def _resolve_bronze_file(
+        self,
+        *,
+        category: str,
+        split: str,
+        relpath: str,
+        expected_sha256: str | None,
+        archive_relpath: str | None = None,
+        include_gt: bool = False,
+    ) -> Path:
+        return self._recovery.restore_bronze_file(
+            category=category,
+            split=split,
+            relpath=relpath,
+            expected_sha256=expected_sha256,
+            explicit_archive_relpath=archive_relpath,
+            include_gt=include_gt,
+        )
 
     def _resolve_silver_bundle(self, record: dict[str, Any]) -> Path:
-        silver_rel = str(record["silver_relpath"])
-        # Expected local path mirrors workspace path under local_silver_root
-        stripped = silver_rel.removeprefix("silver/")
-        local_npz = self.local_silver_root / stripped
-        if not local_npz.is_file():
-            if self.storage_backend is None:
-                raise RemoteArtifactUnavailableError(
-                    f"Silver bundle missing locally at {local_npz} and no storage_backend configured"
-                )
-            try:
-                self.storage_backend.download_file(silver_rel, local_npz, skip_if_exists=False)
-            except Exception as exc:  # noqa: BLE001
-                raise RemoteArtifactUnavailableError(
-                    f"Failed to fetch remote Silver bundle {silver_rel!r}: {exc}"
-                ) from exc
-        return local_npz
+        return self._recovery.restore_silver_member(
+            category=str(record["category_name"]),
+            split=str(record["split"]),
+            silver_relpath=str(record["silver_relpath"]),
+            expected_member_sha256=record.get("silver_sha256"),
+            explicit_shard_relpath=record.get("silver_shard_relpath"),
+            explicit_member_path=record.get("silver_member_path"),
+            hydrate_full_split=(self.hydrate_mode == "category"),
+        )
 
     def __getitem__(self, index: int) -> MultimodalSample:
         rec = self._records[index]
         cat = str(rec["category_name"])
+        split = str(rec["split"])
+        arch_rel = rec.get("bronze_archive_relpath")
+        need_gt = self.partition == "test" and self.include_benchmark_labels
 
-        rgb_path = self._resolve_bronze_file(cat, str(rec["rgb_relpath"]), rec.get("rgb_sha256"))
+        rgb_path = self._resolve_bronze_file(
+            category=cat,
+            split=split,
+            relpath=str(rec["rgb_relpath"]),
+            expected_sha256=rec.get("rgb_sha256"),
+            archive_relpath=arch_rel,
+            include_gt=need_gt,
+        )
         buf = np.fromfile(str(rgb_path), dtype=np.uint8)
         bgr = cv2.imdecode(buf, cv2.IMREAD_COLOR)
         if bgr is None:
@@ -177,12 +228,19 @@ class VistaMultimodalDataset:
         defect_type: str | None = None
         is_anom: bool | None = None
         gt_mask: np.ndarray | None = None
-        if self.partition == "test" and self.include_benchmark_labels:
+        if need_gt:
             defect_type = rec.get("defect_type")
             is_anom = rec.get("is_anomalous_benchmark")
             gt_rel = rec.get("gt_relpath")
             if gt_rel:
-                gt_path = self._resolve_bronze_file(cat, str(gt_rel), rec.get("gt_sha256"))
+                gt_path = self._resolve_bronze_file(
+                    category=cat,
+                    split=split,
+                    relpath=str(gt_rel),
+                    expected_sha256=rec.get("gt_sha256"),
+                    archive_relpath=arch_rel,
+                    include_gt=True,
+                )
                 gt_buf = np.fromfile(str(gt_path), dtype=np.uint8)
                 gt_mask = cv2.imdecode(gt_buf, cv2.IMREAD_UNCHANGED)
                 if gt_mask is None:

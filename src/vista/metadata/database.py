@@ -20,6 +20,10 @@ _ADDITIVE_MIGRATIONS: dict[str, list[tuple[str, str]]] = {
     "gold_exports": [
         ("snapshot_id", "VARCHAR(128)"),
     ],
+    "silver_artifacts": [
+        ("shard_relpath", "TEXT"),
+        ("shard_member_path", "TEXT"),
+    ],
     "quality_metrics": [
         ("fg_method_version", "VARCHAR(32)"),
         ("fg_area_ratio", "DOUBLE PRECISION"),
@@ -86,6 +90,115 @@ def _apply_additive_migrations(engine: Engine) -> None:
                     ),
                     {"att": attempt, "ret": attempt > 1, "sid": stage_run_id},
                 )
+
+        # Backfill genuinely addressable Silver shard+member references for legacy rows
+        if {"silver_artifacts", "samples", "file_manifests"}.issubset(existing_tables):
+            legacy_rows = conn.execute(
+                text(
+                    """
+                    SELECT
+                        sa.artifact_id,
+                        sa.sample_pk,
+                        sa.preprocessing_version,
+                        sa.config_hash,
+                        sa.depth_relpath,
+                        sa.depth_remote_uri,
+                        sa.normal_relpath,
+                        s.category_name,
+                        s.split,
+                        s.defect_type,
+                        s.sample_id
+                    FROM silver_artifacts sa
+                    JOIN samples s ON sa.sample_pk = s.sample_pk
+                    WHERE sa.shard_relpath IS NULL
+                       OR sa.shard_member_path IS NULL
+                       OR sa.depth_remote_uri NOT LIKE '%#%'
+                    """
+                )
+            ).fetchall()
+            if legacy_rows:
+                shard_rows = conn.execute(
+                    text(
+                        """
+                        SELECT relative_path, remote_uri
+                        FROM file_manifests
+                        WHERE layer = 'silver'
+                          AND modality LIKE 'silver_shard_%'
+                        """
+                    )
+                ).fetchall()
+                shard_uri_by_rel = {r[0]: r[1] for r in shard_rows}
+                for (
+                    artifact_id,
+                    sample_pk,
+                    prep_ver,
+                    cfg_hash,
+                    depth_relpath,
+                    old_depth_uri,
+                    normal_relpath,
+                    cat_name,
+                    split_name,
+                    defect_type,
+                    sample_id,
+                ) in legacy_rows:
+                    shard_rel = f"silver/mvtec_3d_ad/{prep_ver}_{cfg_hash}/{cat_name}/shards/{split_name}.tar"
+                    member_rel = f"{defect_type}/{sample_id}.npz"
+                    shard_uri = shard_uri_by_rel.get(shard_rel)
+                    if shard_uri is None:
+                        # Preserve workspace prefix from existing depth_remote_uri
+                        suffix = f"/{depth_relpath}"
+                        if old_depth_uri and old_depth_uri.endswith(suffix):
+                            ws_prefix = old_depth_uri[: -len(suffix)]
+                            shard_uri = f"{ws_prefix}/{shard_rel}"
+                        else:
+                            continue
+                    addr_uri = f"{shard_uri}#{member_rel}"
+                    conn.execute(
+                        text(
+                            """
+                            UPDATE silver_artifacts
+                            SET shard_relpath = :srel,
+                                shard_member_path = :mrel,
+                                depth_remote_uri = :auri,
+                                normal_remote_uri = CASE WHEN normal_relpath IS NOT NULL THEN :auri ELSE NULL END
+                            WHERE artifact_id = :aid
+                            """
+                        ),
+                        {"srel": shard_rel, "mrel": member_rel, "auri": addr_uri, "aid": artifact_id},
+                    )
+                    conn.execute(
+                        text(
+                            """
+                            UPDATE file_manifests
+                            SET remote_uri = :auri
+                            WHERE layer = 'silver'
+                              AND modality = 'depth_normals_bundle'
+                              AND relative_path = :drel
+                            """
+                        ),
+                        {"auri": addr_uri, "drel": depth_relpath},
+                    )
+                    if "artifact_lineage" in existing_tables and old_depth_uri != addr_uri:
+                        conn.execute(
+                            text(
+                                """
+                                UPDATE artifact_lineage
+                                SET target_uri = :auri
+                                WHERE sample_pk = :spk
+                                  AND target_layer = 'silver'
+                                  AND transformation_version = :pver
+                                  AND config_hash = :chash
+                                  AND target_uri = :old_uri
+                                """
+                            ),
+                            {
+                                "auri": addr_uri,
+                                "spk": sample_pk,
+                                "pver": prep_ver,
+                                "chash": cfg_hash,
+                                "old_uri": old_depth_uri,
+                            },
+                        )
 
 
 def init_db(engine: Engine) -> None:

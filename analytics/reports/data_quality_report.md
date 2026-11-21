@@ -1,9 +1,9 @@
 # VISTA — Multimodal Data Quality, Leakage & Operational Telemetry Report
 
-- **Generated (UTC):** `2026-11-21T08:57:26.007599+00:00`
-- **Immutable Gold Snapshot ID:** `snap_1_0_0_silver_v1_172131d3_0233fc000ae3`
-- **Snapshot Manifest SHA-256:** `8a7e18362818b94bab2dda258802e1495a879e85160d518487e4634f272187f7`
-- **Operational Telemetry Cutoff (UTC):** `2026-11-21T08:56:46.049560+00:00`
+- **Generated (UTC):** `2026-11-21T10:13:55.149311+00:00`
+- **Immutable Gold Snapshot ID:** `snap_1_0_0_silver_v1_172131d3_a3cd04efd735`
+- **Snapshot Manifest SHA-256:** `1c50ca3d4956c6fc1c024d4a9ea7126c14364687c909fedc155d2fc5061b2440`
+- **Operational Telemetry Cutoff (UTC):** `2026-11-21T10:13:05.496583+00:00`
 - **Telemetry Consistency Audit:** `PASS (0 inconsistencies)`
 - **Dataset:** `mvtec_3d_ad` version `1.0.0`
 - **Ingested Categories:** `cable_gland, cookie, dowel`
@@ -49,7 +49,7 @@ Canonical statuses:
 | analytics | 4 | 4 | 0 | 0 | 0 | 31.9110 |
 | discover | 10 | 7 | 3 | 0 | 3 | 14.9610 |
 | ingest | 8 | 7 | 1 | 0 | 1 | 119.4940 |
-| publish_gold | 10 | 4 | 5 | 1 | 4 | 376.2140 |
+| publish_gold | 11 | 5 | 5 | 1 | 4 | 356.7740 |
 | quality_metrics | 6 | 6 | 0 | 0 | 0 | 31.4270 |
 | transform | 8 | 6 | 1 | 1 | 1 | 257.7710 |
 | validate | 7 | 7 | 0 | 0 | 0 | 75.0440 |

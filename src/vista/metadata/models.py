@@ -368,6 +368,8 @@ class SilverArtifact(Base):
     config_json: Mapped[str] = mapped_column(Text, nullable=False)
     depth_relpath: Mapped[str] = mapped_column(Text, nullable=False)
     depth_remote_uri: Mapped[str] = mapped_column(Text, nullable=False)
+    shard_relpath: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    shard_member_path: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     depth_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     depth_size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
     normal_relpath: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
