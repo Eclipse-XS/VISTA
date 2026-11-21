@@ -20,7 +20,7 @@ from vista.ingestion.catalog import list_catalog_categories, probe_category_sour
 from vista.logging import configure_logging
 from vista.metadata.database import DatabaseSessionManager, create_db_engine, init_db
 from vista.orchestration.flows import run_category_pipeline
-from vista.storage import build_storage_backend
+from vista.storage import build_storage_backend, cleanup_verified_category_cache
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -45,6 +45,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--archive", type=Path, default=None, help="Optional local .tar.xz path override.")
     p_run.add_argument("--no-upload", action="store_true", help="Skip uploading Bronze/Silver/Gold to remote storage.")
     p_run.add_argument("--skip-analytics", action="store_true", help="Skip dbt build & EDA report generation.")
+    p_run.add_argument("--cleanup-cache", action="store_true", help="Safely reclaim local Bronze/Silver/archive cache after verified remote commit.")
+
+    p_clean = sub.add_parser("cleanup-cache", help="Verify remote Bronze/Silver/Gold artifacts and safely reclaim local cache for one category.")
+    p_clean.add_argument("category", help="Category name to reclaim local cache for.")
+    p_clean.add_argument("--dry-run", action="store_true", help="Verify remote artifacts and report reclaimable size without deleting local files.")
 
     p_gold = sub.add_parser("publish-gold", help="Publish an immutable Gold snapshot from PostgreSQL.")
     p_gold.add_argument("--no-upload", action="store_true")
@@ -98,8 +103,24 @@ def main(argv: list[str] | None = None) -> int:
             local_archive_override=args.archive,
             upload_to_remote=not args.no_upload,
             run_analytics=not args.skip_analytics,
+            cleanup_cache_after_commit=args.cleanup_cache,
         )
         print(json.dumps(result, indent=2, default=str))
+        return 0
+
+    if args.command == "cleanup-cache":
+        engine = create_db_engine(cfg.database)
+        init_db(engine)
+        db = DatabaseSessionManager(engine)
+        storage = build_storage_backend(cfg.storage)
+        res = cleanup_verified_category_cache(
+            cfg=cfg,
+            storage=storage,
+            db=db,
+            category=args.category,
+            dry_run=args.dry_run,
+        )
+        print(json.dumps(asdict(res), indent=2))
         return 0
 
     if args.command == "publish-gold":

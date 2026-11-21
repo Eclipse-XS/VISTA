@@ -16,6 +16,7 @@ from vista.analytics.gold_publisher import (
 )
 from vista.analytics.mlflow_hook import log_gold_snapshot_to_mlflow
 from vista.analytics.reports import generate_eda_figures_and_reports
+from vista.analytics.visual_diagnostics import generate_foreground_visual_diagnostics
 
 __all__ = [
     "GOLD_SCHEMAS",
@@ -25,6 +26,7 @@ __all__ = [
     "execute_analytical_sql_suite",
     "export_operational_telemetry",
     "generate_eda_figures_and_reports",
+    "generate_foreground_visual_diagnostics",
     "log_gold_snapshot_to_mlflow",
     "publish_gold_datasets",
     "resolve_latest_snapshot_dir",

@@ -1,0 +1,54 @@
+{
+  "category": "dowel",
+  "figure": "fg_diagnostics_dowel.png",
+  "cases": [
+    {
+      "role": "High-IoU train/good",
+      "sample_key": "1.0.0:dowel:train:good:000",
+      "split": "train",
+      "defect_type": "good",
+      "fg_rgb_3d_iou": 0.8995,
+      "fg_area_pct": 6.74,
+      "fg_3d_area_pct": 7.46,
+      "fg_missing_3d_pct": 0.01,
+      "bg_missing_3d_pct": 1.37,
+      "fg_plane_inlier_ratio": 1.0
+    },
+    {
+      "role": "High-IoU test/defect",
+      "sample_key": "1.0.0:dowel:test:cut:009",
+      "split": "test",
+      "defect_type": "cut",
+      "fg_rgb_3d_iou": 0.8788,
+      "fg_area_pct": 6.66,
+      "fg_3d_area_pct": 7.45,
+      "fg_missing_3d_pct": 0.17,
+      "bg_missing_3d_pct": 1.22,
+      "fg_plane_inlier_ratio": 1.0
+    },
+    {
+      "role": "Lowest IoU (failure case)",
+      "sample_key": "1.0.0:dowel:test:contamination:008",
+      "split": "test",
+      "defect_type": "contamination",
+      "fg_rgb_3d_iou": 0.7615,
+      "fg_area_pct": 5.98,
+      "fg_3d_area_pct": 7.51,
+      "fg_missing_3d_pct": 0.03,
+      "bg_missing_3d_pct": 1.28,
+      "fg_plane_inlier_ratio": 1.0
+    },
+    {
+      "role": "Max FG 3D Missing (edge case)",
+      "sample_key": "1.0.0:dowel:train:good:281",
+      "split": "train",
+      "defect_type": "good",
+      "fg_rgb_3d_iou": 0.8198,
+      "fg_area_pct": 6.58,
+      "fg_3d_area_pct": 7.6,
+      "fg_missing_3d_pct": 0.74,
+      "bg_missing_3d_pct": 1.01,
+      "fg_plane_inlier_ratio": 1.0
+    }
+  ]
+}

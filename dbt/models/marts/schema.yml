@@ -48,3 +48,9 @@ models:
         tests: [not_null]
       - name: feature_name
         tests: [not_null]
+  - name: mart_material_type_comparison
+    columns:
+      - name: material_type
+        tests: [not_null]
+      - name: category_name
+        tests: [unique, not_null]

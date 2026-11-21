@@ -28,7 +28,7 @@ VISTA is implemented as a **modular monolith** following a **Medallion architect
 - **Processing & Media:** Python 3.11+, NumPy, PyArrow, OpenCV, `tifffile`, SciPy, Matplotlib
 - **Durable Storage:** `rclone` + Google Drive (`VISTA MVTEC3D`) behind an S3-portable `StorageBackend` abstraction
 - **Operational Metadata & Lineage:** PostgreSQL 16 (via Docker Compose) + SQLAlchemy 2.0 (zero large binary BLOBs in Postgres)
-- **Analytical Warehouse:** DuckDB + `dbt-duckdb` (`stg_*` → `dim_*` / `fct_*` → `mart_*`) + automated dbt data tests + 10 SQL analytical queries
+- **Analytical Warehouse:** DuckDB + `dbt-duckdb` (`stg_*` → `dim_*` / `fct_*` → `mart_*`) + automated dbt data tests + 16 SQL analytical queries
 - **Orchestration:** Prefect 3 dependent workflows (`discover → ingest → validate → transform → quality_metrics → publish_gold → analytics`)
 - **Experiment Provenance Hook:** MLflow tracking hook logging versioned Gold Parquet URIs, checksums, and dataset snapshot metrics
 
@@ -79,11 +79,14 @@ docker compose up -d postgres
 # 5. Inspect official MVTec 3D-AD catalog (does NOT download data automatically)
 .\.venv\Scripts\python.exe -m vista catalog --probe
 
-# 6. Run the full end-to-end Prefect pipeline for a single category
-.\.venv\Scripts\python.exe -m vista run-category cable_gland
+# 6. Run the full end-to-end Prefect pipeline for a single category (with verified safe local cache cleanup)
+.\.venv\Scripts\python.exe -m vista run-category cookie --cleanup-cache
 
 # 7. Independently verify the latest committed Gold snapshot
 .\.venv\Scripts\python.exe -m vista verify-snapshot
+
+# 8. Manually verify remote Bronze/Silver/Gold and reclaim local cache for an ingested category
+.\.venv\Scripts\python.exe -m vista cleanup-cache cable_gland --dry-run
 
 # 8. Run offline CI suite (lint + hygiene + unit/integration/dbt tests)
 .\.venv\Scripts\ruff.exe check src tests scripts
@@ -122,9 +125,9 @@ VISTA/
 ├── dbt/                          # DuckDB dbt project (staging, core dim/fct, marts, data tests)
 ├── analytics/
 │   ├── questions.md              # Analytical questions catalog
-│   ├── sql/                      # 10 executable analytical SQL queries
+│   ├── sql/                      # 16 executable analytical SQL queries
 │   ├── reports/                  # Generated EDA & Data Quality Markdown reports
-│   └── figures/                  # Generated matplotlib EDA figures
+│   └── figures/                  # Generated matplotlib EDA figures & visual FG diagnostics
 ├── docs/
 │   ├── architecture.md           # System & Medallion architecture overview
 │   ├── quality_metrics.md        # Mathematical definitions & limitations of quality metrics
@@ -152,9 +155,15 @@ VISTA/
 - Leak-free train-only ML normalization (`normalization_artifacts` + `ml_normalized_features`) fitted exclusively on eligible `train` samples and applied frozen to `validation` and `test`.
 - Atomic, content-addressed, immutable Gold snapshots (`gold/mvtec_3d_ad/snapshots/<snapshot_id>/`) with independent manifest/checksum verification, MLflow snapshot registration, and PyTorch-ready `VistaMultimodalDataset` loader.
 - Authoritative PostgreSQL operational telemetry with retry/attempt tracking, non-NULL duration aggregation, and consistency assertions.
-- DuckDB + `dbt` analytical warehouse (`dim_*`, `fct_*`, `mart_*`), automated dbt tests, 15 analytical SQL queries, and reproducible EDA reports/figures.
-- GitHub Actions CI (Ruff lint, secret/artifact hygiene, unit + offline integration + dbt fixture tests without private credentials).
-- **Verified Real-Dataset Coverage:** `cable_gland` (354 samples: 223 `train`, 23 `validation`, 108 `test` across `good`, `bent`, `cut`, `hole`, `thread`; 253 `PASS`, 101 `WARN` perceptual near-duplicates, 0 `QUARANTINE`, 0 `FAIL`, 0 cross-split leaks; 246 label-isolated training-ready samples; 108 held-out evaluation samples; 354/354 reliable Silver normals; on-object 3D missingness `1.55–1.80%` vs background dropout `42.18–50.14%`). See [analytics/reports/eda_report.md](analytics/reports/eda_report.md) and [analytics/reports/data_quality_report.md](analytics/reports/data_quality_report.md).
+- DuckDB + `dbt` analytical warehouse (`dim_*`, `fct_*`, `mart_*`, including `mart_material_type_comparison`), automated dbt tests, 16 analytical SQL queries, visual foreground segmentation diagnostic panels (`fg_diagnostics_<category>.png`), and reproducible EDA reports/figures.
+- Fail-closed local cache cleanup (`vista cleanup-cache` / `run-category --cleanup-cache`) that independently verifies remote Bronze archives (size + MD5), Silver split shards (size), and committed Gold snapshot manifests before reclaiming local disk space.
+- GitHub Actions CI (Ruff lint, secret/artifact hygiene, 50 unit + offline integration + dbt fixture tests without private credentials).
+- **Verified Real-Dataset Coverage (3 of 10 MVTec 3D-AD Categories, `1,169` Total Samples):**
+  - `cable_gland` (manufactured): `354` samples (`223` train, `23` val, `108` test; `253` PASS, `101` WARN near-dups, `0` FAIL/QUARANTINE; FG 3D missing `1.61%` vs BG `44.68%`; mean `fg_rgb_3d_iou = 0.843`, min `0.715`).
+  - `cookie` (organic): `363` samples (`210` train, `22` val, `131` test; `248` PASS, `115` WARN near-dups, `0` FAIL/QUARANTINE; FG 3D missing `0.09%` vs BG `14.43%`; mean `fg_rgb_3d_iou = 0.907`, min `0.862`).
+  - `dowel` (manufactured): `452` samples (`288` train, `34` val, `130` test; `313` PASS, `139` WARN near-dups, `0` FAIL/QUARANTINE; FG 3D missing `0.12%` vs BG `1.24%`; mean `fg_rgb_3d_iou = 0.819`, min `0.761`).
+  - **Combined Immutable Gold Snapshot (`snap_1_0_0_silver_v1_172131d3_0233fc000ae3`):** `1,169` samples (`800` label-isolated training-ready across `721` train + `79` validation; `369` held-out benchmark evaluation; `0` test rows in training mart; `1,169/1,169` reliable Silver normals; `3` frozen train-only normalization artifacts; `0` telemetry consistency issues). Earlier snapshots (`snap_1_0_0_silver_v1_172131d3_907737715593` and `snap_1_0_0_silver_v1_172131d3_8a27488cf0d1`) remain immutable and independently verified.
+  - See [analytics/reports/eda_report.md](analytics/reports/eda_report.md) and [analytics/reports/data_quality_report.md](analytics/reports/data_quality_report.md).
 
 ### Planned ML Research Components (Not Yet Implemented)
 - Quality-aware RGB + 3D multimodal feature extraction and adaptive fusion architectures.

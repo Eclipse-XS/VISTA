@@ -1,0 +1,54 @@
+{
+  "category": "cookie",
+  "figure": "fg_diagnostics_cookie.png",
+  "cases": [
+    {
+      "role": "High-IoU train/good",
+      "sample_key": "1.0.0:cookie:train:good:117",
+      "split": "train",
+      "defect_type": "good",
+      "fg_rgb_3d_iou": 0.943,
+      "fg_area_pct": 31.89,
+      "fg_3d_area_pct": 33.8,
+      "fg_missing_3d_pct": 0.04,
+      "bg_missing_3d_pct": 14.69,
+      "fg_plane_inlier_ratio": 1.0
+    },
+    {
+      "role": "High-IoU test/defect",
+      "sample_key": "1.0.0:cookie:test:combined:016",
+      "split": "test",
+      "defect_type": "combined",
+      "fg_rgb_3d_iou": 0.9382,
+      "fg_area_pct": 33.16,
+      "fg_3d_area_pct": 35.2,
+      "fg_missing_3d_pct": 0.17,
+      "bg_missing_3d_pct": 14.58,
+      "fg_plane_inlier_ratio": 1.0
+    },
+    {
+      "role": "Lowest IoU (failure case)",
+      "sample_key": "1.0.0:cookie:test:crack:001",
+      "split": "test",
+      "defect_type": "crack",
+      "fg_rgb_3d_iou": 0.8618,
+      "fg_area_pct": 31.55,
+      "fg_3d_area_pct": 36.18,
+      "fg_missing_3d_pct": 0.46,
+      "bg_missing_3d_pct": 15.14,
+      "fg_plane_inlier_ratio": 0.9745
+    },
+    {
+      "role": "Max FG 3D Missing (edge case)",
+      "sample_key": "1.0.0:cookie:test:crack:015",
+      "split": "test",
+      "defect_type": "crack",
+      "fg_rgb_3d_iou": 0.9135,
+      "fg_area_pct": 31.98,
+      "fg_3d_area_pct": 34.29,
+      "fg_missing_3d_pct": 0.65,
+      "bg_missing_3d_pct": 15.01,
+      "fg_plane_inlier_ratio": 1.0
+    }
+  ]
+}

@@ -1,20 +1,20 @@
 # VISTA — Multimodal Data Quality, Leakage & Operational Telemetry Report
 
-- **Generated (UTC):** `2026-11-20T10:28:11.920290+00:00`
-- **Immutable Gold Snapshot ID:** `snap_1_0_0_silver_v1_172131d3_907737715593`
-- **Snapshot Manifest SHA-256:** `e7922b010b8788a8a33b351a17541dca9a1d05dc744d237894bc3fc8b711c97b`
-- **Operational Telemetry Cutoff (UTC):** `2026-11-20T10:27:50.491166+00:00`
+- **Generated (UTC):** `2026-11-21T08:57:26.007599+00:00`
+- **Immutable Gold Snapshot ID:** `snap_1_0_0_silver_v1_172131d3_0233fc000ae3`
+- **Snapshot Manifest SHA-256:** `8a7e18362818b94bab2dda258802e1495a879e85160d518487e4634f272187f7`
+- **Operational Telemetry Cutoff (UTC):** `2026-11-21T08:56:46.049560+00:00`
 - **Telemetry Consistency Audit:** `PASS (0 inconsistencies)`
 - **Dataset:** `mvtec_3d_ad` version `1.0.0`
-- **Ingested Categories:** `cable_gland`
-- **Total Samples Validated:** `354`
+- **Ingested Categories:** `cable_gland, cookie, dowel`
+- **Total Samples Validated:** `1169`
 
 ## 1. Validation Status Breakdown (Q2)
 
 | Status | Sample Count | Share |
 | --- | ---: | ---: |
-| `PASS` | 253 | 71.47% |
-| `WARN` | 101 | 28.53% |
+| `PASS` | 814 | 69.63% |
+| `WARN` | 355 | 30.37% |
 | `QUARANTINE` | 0 | 0.00% |
 | `FAIL` | 0 | 0.00% |
 
@@ -24,6 +24,8 @@ Source SQL: `analytics/sql/02_validation_failures.sql`
 
 | category_name | total_samples | pass_count | pass_rate_pct | warn_count | quarantine_count | fail_count | misaligned_count | exact_duplicate_count | near_duplicate_count | cross_split_leak_count | non_finite_3d_samples |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| cookie | 363 | 248 | 68.3200 | 115 | 0 | 0 | 0 | 0 | 115 | 0 | 0 |
+| dowel | 452 | 313 | 69.2500 | 139 | 0 | 0 | 0 | 0 | 139 | 0 | 0 |
 | cable_gland | 354 | 253 | 71.4700 | 101 | 0 | 0 | 0 | 0 | 101 | 0 | 0 |
 
 
@@ -44,10 +46,10 @@ Canonical statuses:
 
 | stage_name | total_attempts | succeeded | failed | interrupted | retries | avg_succeeded_s |
 | --- | --- | --- | --- | --- | --- | --- |
-| analytics | 2 | 1 | 0 | 0 | 0 | 15.1660 |
-| discover | 8 | 5 | 3 | 0 | 3 | 10.7970 |
-| ingest | 6 | 5 | 1 | 0 | 1 | 19.0940 |
-| publish_gold | 8 | 2 | 5 | 1 | 4 | 179.7160 |
-| quality_metrics | 4 | 4 | 0 | 0 | 0 | 18.6730 |
-| transform | 6 | 4 | 1 | 1 | 1 | 100.7070 |
-| validate | 5 | 5 | 0 | 0 | 0 | 58.3910 |
+| analytics | 4 | 4 | 0 | 0 | 0 | 31.9110 |
+| discover | 10 | 7 | 3 | 0 | 3 | 14.9610 |
+| ingest | 8 | 7 | 1 | 0 | 1 | 119.4940 |
+| publish_gold | 10 | 4 | 5 | 1 | 4 | 376.2140 |
+| quality_metrics | 6 | 6 | 0 | 0 | 0 | 31.4270 |
+| transform | 8 | 6 | 1 | 1 | 1 | 257.7710 |
+| validate | 7 | 7 | 0 | 0 | 0 | 75.0440 |

@@ -291,12 +291,13 @@ def test_full_pipeline_idempotency_quarantine_resume_and_dbt(tmp_path: Path) -> 
     assert set(train_tbl.column("partition").to_pylist()) == {"train", "validation"}
     assert set(train_tbl.column("split").to_pylist()).issubset({"train", "validation"})
 
-    # 6. dbt build + all 15 analytical SQL queries against DuckDB
+    # 6. dbt build + all 16 analytical SQL queries against DuckDB
     dbt_res = run_dbt_build(cfg, snapshot_dir=snapshot.local_snapshot_dir)
     assert dbt_res["returncode"] == 0
     sql_res = execute_analytical_sql_suite(cfg)
-    assert len(sql_res) == 15
+    assert len(sql_res) == 16
     assert len(sql_res["01_dataset_inventory.sql"].rows) == 3
+    assert "16_cross_category_organic_vs_manufactured.sql" in sql_res
 
     con = duckdb.connect(dbt_res["duckdb_path"], read_only=True)
     try:

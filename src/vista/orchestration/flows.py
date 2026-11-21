@@ -21,6 +21,7 @@ from vista.analytics.gold_publisher import (
 )
 from vista.analytics.mlflow_hook import log_gold_snapshot_to_mlflow
 from vista.analytics.reports import generate_eda_figures_and_reports
+from vista.analytics.visual_diagnostics import generate_foreground_visual_diagnostics
 from vista.config import VistaConfig
 from vista.ingestion.catalog import get_category_spec, probe_category_source
 from vista.ingestion.ingestor import ingest_category_to_bronze
@@ -29,7 +30,11 @@ from vista.metadata.database import DatabaseSessionManager, create_db_engine, in
 from vista.metadata.repository import MetadataRepository
 from vista.preprocessing.processor import transform_category_to_silver
 from vista.quality.extractor import extract_category_quality
-from vista.storage import StorageBackend, build_storage_backend
+from vista.storage import (
+    StorageBackend,
+    build_storage_backend,
+    cleanup_verified_category_cache,
+)
 from vista.validation.validator import validate_category
 
 log = get_logger(__name__)
@@ -255,8 +260,18 @@ def analytics_task(
     category: str,
     run_id: str,
     snapshot_dir: str | None = None,
+    category_root: str | None = None,
 ) -> dict[str, Any]:
     def _run(_stage_id: int):
+        # Generate visual foreground segmentation diagnostics while local Bronze files are present
+        vis_res = None
+        if category_root and Path(category_root).is_dir():
+            vis_res = generate_foreground_visual_diagnostics(
+                cfg=cfg,
+                db=db,
+                category=category,
+                category_root=Path(category_root),
+            )
         # Export authoritative post-publish operational telemetry (now includes SUCCEEDED publish_gold!)
         tel = export_operational_telemetry(cfg=cfg, db=db)
         snap_path = Path(snapshot_dir) if snapshot_dir else None
@@ -280,6 +295,7 @@ def analytics_task(
             "telemetry_consistency_issues": tel["consistency_issues"],
             "dbt_duckdb": dbt_res["duckdb_path"],
             "sql_queries_executed": len(sql_res),
+            "visual_diagnostics": vis_res["figure"] if vis_res else None,
             "reports": rep_res,
         }
         return summary, len(sql_res), 0, summary
@@ -297,6 +313,7 @@ def run_category_pipeline(
     local_archive_override: Path | None = None,
     upload_to_remote: bool = True,
     run_analytics: bool = True,
+    cleanup_cache_after_commit: bool = False,
 ) -> dict[str, Any]:
     """Execute the full dependent Medallion & analytics pipeline for one MVTec 3D-AD category."""
     cfg = cfg or VistaConfig.load()
@@ -351,10 +368,22 @@ def run_category_pipeline(
                 category,
                 run_id,
                 snapshot_dir=gold["local_snapshot_dir"],
+                category_root=cat_root,
             )
             if run_analytics
             else None
         )
+
+        cleanup_res = None
+        if cleanup_cache_after_commit and upload_to_remote:
+            cleanup_summary = cleanup_verified_category_cache(
+                cfg=cfg,
+                storage=storage,
+                db=db,
+                category=category,
+                dry_run=False,
+            )
+            cleanup_res = asdict(cleanup_summary)
 
         with db.session() as sess:
             MetadataRepository(sess).finish_pipeline_run(run_id, "SUCCEEDED")
@@ -369,6 +398,7 @@ def run_category_pipeline(
             "quality_metrics": qm,
             "publish_gold": gold,
             "analytics": ana,
+            "cache_cleanup": cleanup_res,
         }
     except Exception as exc:
         with db.session() as sess:

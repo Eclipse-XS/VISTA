@@ -19,3 +19,4 @@ Each question below maps directly to an executable DuckDB SQL query in `analytic
 | 13 | Which modality exhibits stronger train-to-test shifts and framing/footprint effects? | `13_train_test_distribution_shift.sql` | `mart_split_distribution_shift` |
 | 14 | Which samples have extreme global vs foreground geometric missingness? | `14_extreme_geometric_missingness.sql` | `fct_data_quality`, `fct_ml_normalized_features` |
 | 15 | Which quality indicators are plausible adaptive-fusion candidates vs shortcut risks? | `15_fusion_feature_assessment.sql` | `mart_split_distribution_shift` |
+| 16 | How do organic vs manufactured categories compare across quality, missingness, and foreground segmentation reliability? | `16_cross_category_organic_vs_manufactured.sql` | `mart_material_type_comparison` |

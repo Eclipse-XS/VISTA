@@ -4,6 +4,11 @@ from pathlib import Path
 
 from vista.config import StorageConfig
 from vista.storage.base import RemoteObjectInfo, StorageBackend, md5_file, sha256_file
+from vista.storage.cache import (
+    CacheCleanupSummary,
+    CacheCleanupVerificationError,
+    cleanup_verified_category_cache,
+)
 from vista.storage.local import LocalStorageBackend
 from vista.storage.paths import (
     ALLOWED_WORKSPACE_PREFIXES,
@@ -33,6 +38,8 @@ def build_storage_backend(config: StorageConfig | None = None) -> StorageBackend
 __all__ = [
     "ALLOWED_WORKSPACE_PREFIXES",
     "BronzeImmutabilityError",
+    "CacheCleanupSummary",
+    "CacheCleanupVerificationError",
     "LocalStorageBackend",
     "RcloneStorageBackend",
     "RemoteObjectInfo",
@@ -43,6 +50,7 @@ __all__ = [
     "bronze_manifest_path",
     "bronze_raw_sample_path",
     "build_storage_backend",
+    "cleanup_verified_category_cache",
     "gold_table_path",
     "is_bronze_path",
     "md5_file",

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from typing import Any
 
@@ -20,7 +21,7 @@ from vista.logging import get_logger
 log = get_logger(__name__)
 
 
-def _md_table(columns: list[str], rows: list[tuple[Any, ...]], max_rows: int = 40) -> str:
+def _md_table(columns: list[str], rows: list[tuple[Any, ...]], max_rows: int = 80) -> str:
     if not columns:
         return "_No columns returned._"
     if not rows:
@@ -134,8 +135,10 @@ def generate_eda_figures_and_reports(
                 q.fg_missing_3d_ratio,
                 q.bg_missing_3d_ratio,
                 q.bg_rgb_brightness_mean,
-                q.fg_center_offset_norm
+                q.fg_center_offset_norm,
+                COALESCE(c.material_type, 'unknown') AS material_type
             FROM main.dim_sample s
+            LEFT JOIN main.dim_category c ON s.category_name = c.category_name
             LEFT JOIN main.fct_validation_results v ON s.sample_pk = v.sample_pk
             LEFT JOIN main.fct_data_quality q
               ON s.sample_pk = q.sample_pk
@@ -228,27 +231,46 @@ def generate_eda_figures_and_reports(
             generated_figs.append(f2.name)
         plt.close(fig)
 
+        cat_palette = ["#2b6cb0", "#dd6b20", "#38a169", "#805ad5", "#d53f8c", "#319795", "#b7791f", "#e53e3e"]
+        cat_colors = {c: cat_palette[i % len(cat_palette)] for i, c in enumerate(categories)}
+        cat_material = {c: next((r[22] for r in rows if r[0] == c), "unknown") for c in categories}
+        split_markers = {"train": "o", "validation": "^", "test": "s"}
+        multi_cat = len(categories) > 1
+
         # Figure 3: Cross-modal RGB brightness vs 3D missingness — Global vs Foreground side-by-side
-        fig, axes = plt.subplots(1, 2, figsize=(11.5, 4.6), dpi=140)
+        fig, axes = plt.subplots(1, 2, figsize=(12.0, 4.8), dpi=140)
         split_colors = {"train": "#2b6cb0", "validation": "#38a169", "test": "#dd6b20"}
-        for sp in splits:
-            gx = [r[5] for r in rows if r[1] == sp and r[5] is not None and r[10] is not None]
-            gy = [r[10] for r in rows if r[1] == sp and r[5] is not None and r[10] is not None]
-            if gx:
-                axes[0].scatter(gx, gy, alpha=0.65, s=22, label=sp, color=split_colors[sp])
-            fx = [r[15] for r in rows if r[1] == sp and r[15] is not None and r[18] is not None]
-            fy = [r[18] for r in rows if r[1] == sp and r[15] is not None and r[18] is not None]
-            if fx:
-                axes[1].scatter(fx, fy, alpha=0.65, s=22, label=sp, color=split_colors[sp])
+        if multi_cat:
+            for c in categories:
+                for sp in splits:
+                    gx = [r[5] for r in rows if r[0] == c and r[1] == sp and r[5] is not None and r[10] is not None]
+                    gy = [r[10] for r in rows if r[0] == c and r[1] == sp and r[5] is not None and r[10] is not None]
+                    lbl = f"{c} ({cat_material[c]})" if sp == "train" else None
+                    if gx:
+                        axes[0].scatter(gx, gy, alpha=0.6, s=20, label=lbl, color=cat_colors[c], marker=split_markers[sp])
+                    fx = [r[15] for r in rows if r[0] == c and r[1] == sp and r[15] is not None and r[18] is not None]
+                    fy = [r[18] for r in rows if r[0] == c and r[1] == sp and r[15] is not None and r[18] is not None]
+                    if fx:
+                        axes[1].scatter(fx, fy, alpha=0.6, s=20, label=lbl, color=cat_colors[c], marker=split_markers[sp])
+        else:
+            for sp in splits:
+                gx = [r[5] for r in rows if r[1] == sp and r[5] is not None and r[10] is not None]
+                gy = [r[10] for r in rows if r[1] == sp and r[5] is not None and r[10] is not None]
+                if gx:
+                    axes[0].scatter(gx, gy, alpha=0.65, s=22, label=sp, color=split_colors[sp])
+                fx = [r[15] for r in rows if r[1] == sp and r[15] is not None and r[18] is not None]
+                fy = [r[18] for r in rows if r[1] == sp and r[15] is not None and r[18] is not None]
+                if fx:
+                    axes[1].scatter(fx, fy, alpha=0.65, s=22, label=sp, color=split_colors[sp])
         axes[0].set_title("Global RGB Brightness vs Global 3D Missingness")
         axes[0].set_xlabel("Global Mean Luminance (0–255)")
         axes[0].set_ylabel("Global Missing 3D Ratio")
-        axes[0].legend()
+        axes[0].legend(fontsize=8)
         axes[0].grid(alpha=0.3)
         axes[1].set_title("Foreground RGB Brightness vs Foreground 3D Missingness")
         axes[1].set_xlabel("Foreground Mean Luminance (0–255)")
         axes[1].set_ylabel("Foreground Missing 3D Ratio")
-        axes[1].legend()
+        axes[1].legend(fontsize=8)
         axes[1].grid(alpha=0.3)
         fig.tight_layout()
         f3 = fig_dir / "03_cross_modal_rgb_vs_3d_missing.png"
@@ -278,17 +300,27 @@ def generate_eda_figures_and_reports(
             plt.close(fig)
             generated_figs.append(f4.name)
 
-        # Figure 5: RGB Brightness vs Contrast (Global vs Foreground)
-        fig, ax = plt.subplots(figsize=(8, 4.8), dpi=140)
-        for sp in splits:
-            bx = [r[15] for r in rows if r[1] == sp and r[15] is not None and r[16] is not None]
-            cy = [r[16] for r in rows if r[1] == sp and r[15] is not None and r[16] is not None]
-            if bx:
-                ax.scatter(bx, cy, alpha=0.65, s=22, label=f"{sp} (foreground)", color=split_colors[sp])
+        # Figure 5: Foreground RGB Photometric Profile by Category & Split
+        fig, ax = plt.subplots(figsize=(8.5, 4.8), dpi=140)
+        if multi_cat:
+            for c in categories:
+                for sp in splits:
+                    bx = [r[15] for r in rows if r[0] == c and r[1] == sp and r[15] is not None and r[16] is not None]
+                    cy = [r[16] for r in rows if r[0] == c and r[1] == sp and r[15] is not None and r[16] is not None]
+                    lbl = f"{c} ({cat_material[c]})" if sp == "train" else None
+                    if bx:
+                        ax.scatter(bx, cy, alpha=0.6, s=22, label=lbl, color=cat_colors[c], marker=split_markers[sp])
+            ax.set_title("Foreground RGB Photometric Profile by Category (o=train, ^=val, sq=test)")
+        else:
+            for sp in splits:
+                bx = [r[15] for r in rows if r[1] == sp and r[15] is not None and r[16] is not None]
+                cy = [r[16] for r in rows if r[1] == sp and r[15] is not None and r[16] is not None]
+                if bx:
+                    ax.scatter(bx, cy, alpha=0.65, s=22, label=f"{sp} (foreground)", color=split_colors[sp])
+            ax.set_title("Foreground RGB Photometric Profile by Split")
         ax.set_xlabel("Foreground RGB Mean Luminance (Rec.709, 0–255)")
         ax.set_ylabel("Foreground RGB RMS Contrast (0–1)")
-        ax.set_title("Foreground RGB Photometric Profile by Split")
-        ax.legend()
+        ax.legend(fontsize=8)
         ax.grid(alpha=0.3)
         fig.tight_layout()
         f5 = fig_dir / "05_rgb_brightness_vs_contrast.png"
@@ -296,51 +328,58 @@ def generate_eda_figures_and_reports(
         plt.close(fig)
         generated_figs.append(f5.name)
 
-        # Figure 6: Group comparison (train/good, val/good, test/good, test/anomalous) Global vs FG
-        groups = [
-            ("train/good", [r for r in rows if r[1] == "train"]),
-            ("val/good", [r for r in rows if r[1] == "validation"]),
-            ("test/good", [r for r in rows if r[1] == "test" and not r[3]]),
-            ("test/anomalous", [r for r in rows if r[1] == "test" and r[3]]),
-        ]
-        active_groups = [(name, grp) for name, grp in groups if grp]
-        if len(active_groups) >= 2:
-            fig, axes = plt.subplots(1, 2, figsize=(11, 4.5), dpi=140)
+        # Figure 6: Per-category Group Comparison (train/good, val/good, test/good, test/anomalous) Global vs FG
+        n_cats = len(categories)
+        fig, axes = plt.subplots(n_cats, 2, figsize=(11.5, max(4.3, 3.3 * n_cats)), dpi=140, squeeze=False)
+        any_f6 = False
+        for c_idx, c in enumerate(categories):
+            c_rows = [r for r in rows if r[0] == c]
+            groups = [
+                ("train/good", [r for r in c_rows if r[1] == "train"]),
+                ("val/good", [r for r in c_rows if r[1] == "validation"]),
+                ("test/good", [r for r in c_rows if r[1] == "test" and not r[3]]),
+                ("test/anomalous", [r for r in c_rows if r[1] == "test" and r[3]]),
+            ]
+            active_groups = [(name, grp) for name, grp in groups if grp]
+            if len(active_groups) < 2:
+                continue
+            any_f6 = True
             g_names = [g[0] for g in active_groups]
             gx = np.arange(len(g_names))
             w = 0.28
             g_miss = [np.mean([r[10] for r in g[1] if r[10] is not None]) for g in active_groups]
             fg_miss = [np.mean([r[18] for r in g[1] if r[18] is not None]) for g in active_groups]
             bg_miss = [np.mean([r[19] for r in g[1] if r[19] is not None]) for g in active_groups]
-            axes[0].bar(gx - w, g_miss, width=w, label="Global 3D Missing", color="#718096")
-            axes[0].bar(gx, fg_miss, width=w, label="Foreground 3D Missing", color="#2b6cb0")
-            axes[0].bar(gx + w, bg_miss, width=w, label="Background 3D Missing", color="#e53e3e")
-            axes[0].set_xticks(gx)
-            axes[0].set_xticklabels(g_names, rotation=15)
-            axes[0].set_ylabel("Mean Missing 3D Ratio")
-            axes[0].set_title("3D Missingness Decomposition by Split & Benchmark Group")
-            axes[0].legend()
-            axes[0].grid(axis="y", alpha=0.3)
+            axes[c_idx, 0].bar(gx - w, g_miss, width=w, label="Global 3D Missing", color="#718096")
+            axes[c_idx, 0].bar(gx, fg_miss, width=w, label="Foreground 3D Missing", color="#2b6cb0")
+            axes[c_idx, 0].bar(gx + w, bg_miss, width=w, label="Background 3D Missing", color="#e53e3e")
+            axes[c_idx, 0].set_xticks(gx)
+            axes[c_idx, 0].set_xticklabels(g_names, rotation=12)
+            axes[c_idx, 0].set_ylabel("Mean Missing 3D Ratio")
+            axes[c_idx, 0].set_title(f"{c} ({cat_material[c]}) — 3D Missingness Decomposition")
+            axes[c_idx, 0].legend(fontsize=8)
+            axes[c_idx, 0].grid(axis="y", alpha=0.3)
 
             g_lum = [np.mean([r[5] for r in g[1] if r[5] is not None]) for g in active_groups]
             fg_lum = [np.mean([r[15] for r in g[1] if r[15] is not None]) for g in active_groups]
             bg_lum = [np.mean([r[20] for r in g[1] if r[20] is not None]) for g in active_groups]
-            axes[1].bar(gx - w, g_lum, width=w, label="Global Lum", color="#718096")
-            axes[1].bar(gx, fg_lum, width=w, label="Foreground Lum", color="#38a169")
-            axes[1].bar(gx + w, bg_lum, width=w, label="Background Lum", color="#dd6b20")
-            axes[1].set_xticks(gx)
-            axes[1].set_xticklabels(g_names, rotation=15)
-            axes[1].set_ylabel("Mean Luminance (0–255)")
-            axes[1].set_title("RGB Luminance Decomposition by Split & Benchmark Group")
-            axes[1].legend()
-            axes[1].grid(axis="y", alpha=0.3)
+            axes[c_idx, 1].bar(gx - w, g_lum, width=w, label="Global Lum", color="#718096")
+            axes[c_idx, 1].bar(gx, fg_lum, width=w, label="Foreground Lum", color="#38a169")
+            axes[c_idx, 1].bar(gx + w, bg_lum, width=w, label="Background Lum", color="#dd6b20")
+            axes[c_idx, 1].set_xticks(gx)
+            axes[c_idx, 1].set_xticklabels(g_names, rotation=12)
+            axes[c_idx, 1].set_ylabel("Mean Luminance (0–255)")
+            axes[c_idx, 1].set_title(f"{c} ({cat_material[c]}) — RGB Luminance Decomposition")
+            axes[c_idx, 1].legend(fontsize=8)
+            axes[c_idx, 1].grid(axis="y", alpha=0.3)
+        if any_f6:
             fig.tight_layout()
             f6 = fig_dir / "06_global_vs_foreground_quality.png"
             fig.savefig(f6)
-            plt.close(fig)
             generated_figs.append(f6.name)
+        plt.close(fig)
 
-        # Figure 7: Standardized train-to-test shift (Cohen's d relative to train std)
+        # Figure 7: Standardized train-to-test shift per category (Cohen's d relative to train std)
         shift_specs = [
             ("Global 3D Missing", 10),
             ("BG 3D Missing", 19),
@@ -354,40 +393,57 @@ def generate_eda_figures_and_reports(
             ("FG RGB-3D IoU", 14),
             ("FG Center Offset", 21),
         ]
-        train_sub = [r for r in rows if r[1] == "train"]
-        val_sub = [r for r in rows if r[1] == "validation"]
-        test_sub = [r for r in rows if r[1] == "test"]
-        if len(train_sub) >= 5 and len(test_sub) >= 5:
-            shift_labels: list[str] = []
-            d_test_vals: list[float] = []
-            d_val_vals: list[float] = []
-            for lbl, idx in shift_specs:
-                tr_v = np.array([r[idx] for r in train_sub if r[idx] is not None], dtype=np.float64)
-                te_v = np.array([r[idx] for r in test_sub if r[idx] is not None], dtype=np.float64)
-                va_v = np.array([r[idx] for r in val_sub if r[idx] is not None], dtype=np.float64)
-                if tr_v.size >= 3 and te_v.size >= 3 and tr_v.std() > 1e-12:
-                    shift_labels.append(lbl)
-                    d_test_vals.append(float((te_v.mean() - tr_v.mean()) / tr_v.std()))
-                    d_val_vals.append(
-                        float((va_v.mean() - tr_v.mean()) / tr_v.std()) if va_v.size >= 2 else 0.0
-                    )
-            if shift_labels:
-                fig, ax = plt.subplots(figsize=(9.5, 5.0), dpi=140)
-                y_pos = np.arange(len(shift_labels))
-                ax.barh(y_pos - 0.18, d_test_vals, height=0.35, label="Test vs Train (SD units)", color="#e53e3e")
-                ax.barh(y_pos + 0.18, d_val_vals, height=0.35, label="Val vs Train (SD units)", color="#38a169")
+        shift_cats = [
+            c
+            for c in categories
+            if sum(1 for r in rows if r[0] == c and r[1] == "train") >= 5
+            and sum(1 for r in rows if r[0] == c and r[1] == "test") >= 5
+        ]
+        if shift_cats:
+            fig, axes = plt.subplots(
+                1,
+                len(shift_cats),
+                figsize=(max(9.0, 5.2 * len(shift_cats)), 5.2),
+                dpi=140,
+                sharey=True,
+                squeeze=False,
+            )
+            y_pos = np.arange(len(shift_specs))
+            for idx_c, c in enumerate(shift_cats):
+                ax = axes[0, idx_c]
+                train_sub = [r for r in rows if r[0] == c and r[1] == "train"]
+                val_sub = [r for r in rows if r[0] == c and r[1] == "validation"]
+                test_sub = [r for r in rows if r[0] == c and r[1] == "test"]
+                d_test_vals: list[float] = []
+                d_val_vals: list[float] = []
+                for _, col_idx in shift_specs:
+                    tr_v = np.array([r[col_idx] for r in train_sub if r[col_idx] is not None], dtype=np.float64)
+                    te_v = np.array([r[col_idx] for r in test_sub if r[col_idx] is not None], dtype=np.float64)
+                    va_v = np.array([r[col_idx] for r in val_sub if r[col_idx] is not None], dtype=np.float64)
+                    if tr_v.size >= 3 and te_v.size >= 3 and tr_v.std() > 1e-12:
+                        d_test_vals.append(float((te_v.mean() - tr_v.mean()) / tr_v.std()))
+                        d_val_vals.append(
+                            float((va_v.mean() - tr_v.mean()) / tr_v.std()) if va_v.size >= 2 else 0.0
+                        )
+                    else:
+                        d_test_vals.append(0.0)
+                        d_val_vals.append(0.0)
+                ax.barh(y_pos - 0.18, d_test_vals, height=0.35, label="Test vs Train (SD)", color="#e53e3e")
+                ax.barh(y_pos + 0.18, d_val_vals, height=0.35, label="Val vs Train (SD)", color="#38a169")
                 ax.axvline(0.0, color="#2d3748", linewidth=1)
                 ax.set_yticks(y_pos)
-                ax.set_yticklabels(shift_labels)
-                ax.set_xlabel("Standardized Mean Shift Relative to Train SD")
-                ax.set_title("Train-to-Test vs Train-to-Validation Distribution Shift (Global vs Foreground)")
-                ax.legend()
+                if idx_c == 0:
+                    ax.set_yticklabels([lbl for lbl, _ in shift_specs])
+                ax.set_xlabel("Standardized Shift (Train SD)")
+                ax.set_title(f"{c} ({cat_material[c]})")
+                ax.legend(fontsize=8)
                 ax.grid(axis="x", alpha=0.3)
-                fig.tight_layout()
-                f7 = fig_dir / "07_split_distribution_shifts.png"
-                fig.savefig(f7)
-                plt.close(fig)
-                generated_figs.append(f7.name)
+            fig.suptitle("Train-to-Test vs Train-to-Validation Distribution Shifts by Category", fontsize=12)
+            fig.tight_layout(rect=(0, 0, 1, 0.95))
+            f7 = fig_dir / "07_split_distribution_shifts.png"
+            fig.savefig(f7)
+            plt.close(fig)
+            generated_figs.append(f7.name)
 
     # Statistical cross-modal correlation suite with bootstrap 95% CIs & partial Spearman
     stat_table_rows: list[tuple[Any, ...]] = []
@@ -490,6 +546,121 @@ def generate_eda_figures_and_reports(
                             )
                         )
 
+    # Cross-category generalization matrix (testing whether single-category patterns generalize)
+    generalization_rows: list[tuple[Any, ...]] = []
+    if rows:
+        for c in sorted({r[0] for r in rows}):
+            c_sub = [
+                r
+                for r in rows
+                if r[0] == c
+                and r[5] is not None
+                and r[10] is not None
+                and r[13] is not None
+                and r[14] is not None
+                and r[15] is not None
+                and r[18] is not None
+                and r[19] is not None
+            ]
+            if len(c_sub) < 10:
+                continue
+            mat_type = c_sub[0][22]
+            g_sp, _ = scipy_stats.spearmanr([r[5] for r in c_sub], [r[10] for r in c_sub])
+            fg_sp, fg_p = scipy_stats.spearmanr([r[15] for r in c_sub], [r[18] for r in c_sub])
+            covs = np.column_stack(
+                [
+                    np.array([r[13] for r in c_sub], dtype=np.float64),
+                    np.array([r[19] for r in c_sub], dtype=np.float64),
+                ]
+            )
+            part_fg, part_p = _partial_spearman(
+                np.array([r[15] for r in c_sub], dtype=np.float64),
+                np.array([r[18] for r in c_sub], dtype=np.float64),
+                covs,
+            )
+            iou_vals = np.array([r[14] for r in c_sub], dtype=np.float64)
+            fg_m_vals = np.array([r[18] for r in c_sub], dtype=np.float64)
+            bg_m_vals = np.array([r[19] for r in c_sub], dtype=np.float64)
+            tr_c = [r for r in c_sub if r[1] == "train"]
+            te_c = [r for r in c_sub if r[1] == "test"]
+            bg_shift = float("nan")
+            fg_shift = float("nan")
+            if len(tr_c) >= 5 and len(te_c) >= 5:
+                tr_bg = np.array([r[19] for r in tr_c], dtype=np.float64)
+                te_bg = np.array([r[19] for r in te_c], dtype=np.float64)
+                bg_shift = float((te_bg.mean() - tr_bg.mean()) / max(tr_bg.std(), 1e-12))
+                tr_fg = np.array([r[18] for r in tr_c], dtype=np.float64)
+                te_fg = np.array([r[18] for r in te_c], dtype=np.float64)
+                fg_shift = float((te_fg.mean() - tr_fg.mean()) / max(tr_fg.std(), 1e-12))
+            generalization_rows.append(
+                (
+                    c,
+                    mat_type,
+                    len(c_sub),
+                    round(float(g_sp), 4),
+                    f"{fg_sp:.4f} (p={fg_p:.3g})",
+                    f"{part_fg:.4f} (p={part_p:.3g})",
+                    f"{iou_vals.mean():.3f} (min {iou_vals.min():.3f})",
+                    f"{100.0 * fg_m_vals.mean():.2f}%",
+                    f"{100.0 * bg_m_vals.mean():.2f}%",
+                    f"{bg_shift:+.2f} SD" if np.isfinite(bg_shift) else "—",
+                    f"{fg_shift:+.2f} SD" if np.isfinite(fg_shift) else "—",
+                )
+            )
+
+    # Auto-discover persisted per-category visual foreground diagnostic artifacts
+    visual_diag_blocks: list[str] = []
+    for c in sorted({r[0] for r in rows}):
+        meta_path = fig_dir / f"fg_diagnostics_{c}.json"
+        if not meta_path.exists():
+            continue
+        try:
+            payload = json.loads(meta_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        fig_name = payload.get("figure")
+        cases = payload.get("cases", [])
+        if fig_name and (fig_dir / fig_name).exists():
+            case_rows = [
+                (
+                    cs.get("role"),
+                    cs.get("sample_key"),
+                    cs.get("split"),
+                    cs.get("defect_type"),
+                    cs.get("fg_rgb_3d_iou"),
+                    f"{cs.get('fg_area_pct', 0.0):.2f}%",
+                    f"{cs.get('fg_3d_area_pct', 0.0):.2f}%",
+                    f"{cs.get('fg_missing_3d_pct', 0.0):.2f}%",
+                    f"{cs.get('bg_missing_3d_pct', 0.0):.2f}%",
+                    cs.get("fg_plane_inlier_ratio"),
+                )
+                for cs in cases
+            ]
+            visual_diag_blocks.append(
+                f"### Foreground Visual Diagnostics — `{c}`\n\n"
+                f"![Foreground Visual Diagnostics — {c}](../figures/{fig_name})\n\n"
+                + _md_table(
+                    [
+                        "case_role",
+                        "sample_key",
+                        "split",
+                        "defect_type",
+                        "fg_rgb_3d_iou",
+                        "fg_rgb_area",
+                        "fg_3d_area",
+                        "fg_3d_missing",
+                        "bg_3d_missing",
+                        "plane_inlier_ratio",
+                    ],
+                    case_rows,
+                )
+            )
+    visual_diag_md = (
+        "\n\n".join(visual_diag_blocks)
+        if visual_diag_blocks
+        else "_Visual foreground diagnostics have not yet been generated for the ingested categories._"
+    )
+
     now_iso = datetime.now(timezone.utc).isoformat()
     ingested_cats = sorted({r[0] for r in rows})
     total_samples = len(rows)
@@ -515,7 +686,7 @@ def generate_eda_figures_and_reports(
 - **Telemetry Cutoff (UTC):** `{tel_cutoff}`
 - **Dataset:** `{cfg.dataset_name}` version `{cfg.dataset_version}` (`{cfg.license}`)
 - **Preprocessing Version:** `{cfg.preprocessing.version}` (config hash `{cfg.preprocessing.config_hash}`)
-- **Ingested Categories Covered:** `{", ".join(ingested_cats) if ingested_cats else "NONE"}`
+- **Ingested Categories Covered ({len(ingested_cats)} of 10):** `{", ".join(ingested_cats) if ingested_cats else "NONE"}`
 - **Total Indexed Samples:** `{total_samples}`
 - **Training Mart Test-Leakage Check (`mart_training_ready_samples` where `split='test'`):** `{train_leak_check}` rows
 - **Training Mart Partitions:** `{", ".join(f"{sp}={cnt}" for sp, cnt in train_partition_counts)}`
@@ -534,7 +705,17 @@ def generate_eda_figures_and_reports(
 
 ![Inventory by Category and Split](../figures/01_inventory_by_split.png)
 
-## 2. Global vs Foreground-Aware Quality Decomposition (P1 Q1 & Q4)
+## 2. Cross-Category Comparison: Organic vs Manufactured & Generalization Assessment
+
+{_section_for("16_cross_category_organic_vs_manufactured.sql", "Organic vs Manufactured Category Comparison (SQL)")}
+
+### Cross-Category Generalization Matrix (Testing Single-Category Hypotheses Across Categories)
+
+The table below tests whether patterns observed in `cable_gland` (strong negative global brightness-vs-3D-missingness correlation collapsing on foreground, high RGB-3D segmentation agreement, and large background-driven train→test shifts) generalize across all ingested categories:
+
+{_md_table(["category", "material_type", "n", "global_spearman", "fg_spearman", "fg_partial_spearman", "fg_rgb_3d_iou_mean_min", "fg_3d_missing_mean", "bg_3d_missing_mean", "bg_miss_test_shift", "fg_miss_test_shift"], generalization_rows)}
+
+## 3. Global vs Foreground-Aware Quality Decomposition (P1 Q1 & Q4)
 
 {_section_for("11_foreground_vs_global_quality.sql", "Global vs Foreground vs Background Quality Metrics")}
 
@@ -548,7 +729,13 @@ def generate_eda_figures_and_reports(
 
 {_section_for("04_geometry_quality.sql", "3D Geometric Quality by Category")}
 
-## 3. Cross-Modal Association: Global vs Background-Adjusted Foreground (Q5 & P1 Q2)
+## 4. Visual Foreground Segmentation Examples & Failure Cases
+
+Each panel shows 4 deterministically selected real samples per category: (1) highest RGB-3D IoU `train/good`, (2) highest RGB-3D IoU `test/defect`, (3) **lowest `fg_rgb_3d_iou` failure case**, and (4) **highest foreground 3D missingness edge case**. Columns show Original RGB, unsupervised `fg_rgb` (Otsu contrast), unsupervised `fg_3d` (plane residual `> 4 mm`), RGB-vs-3D Agreement (Green = both, Blue = RGB-only, Red = 3D-only), and Valid Depth.
+
+{visual_diag_md}
+
+## 5. Cross-Modal Association: Global vs Background-Adjusted Foreground (Q5 & P1 Q2)
 
 {_section_for("05_cross_modal_quality.sql", "Global Cross-Modal Pearson Correlations (SQL)")}
 
@@ -562,7 +749,7 @@ Partial Spearman controls simultaneously for object footprint (`fg_area_ratio`) 
 
 {_md_table(["category", "metric_pair", "n", "spearman_95ci", "spearman_p", "pearson_95ci", "partial_spearman_bg_adj"], stat_table_rows)}
 
-## 4. Train-to-Test Distribution Shift & Framing / Footprint Effects (P1 Q3 & Q5)
+## 6. Train-to-Test Distribution Shift & Framing / Footprint Effects (P1 Q3 & Q5)
 
 {_section_for("13_train_test_distribution_shift.sql", "Train vs Validation vs Test Standardized Shifts (SQL)")}
 
@@ -574,17 +761,17 @@ Note: The `test/good` vs `test/anomalous` columns below are strictly retrospecti
 
 {_md_table(["category", "feature", "train_mean", "test_mean", "test_shift_sd", "test_good_shift_sd", "test_anom_shift_sd", "ks_stat", "ks_p"], shift_stat_rows)}
 
-## 5. Extreme Geometric Missingness & Outlier Diagnostics (Q6 & P1 Q4)
+## 7. Extreme Geometric Missingness & Outlier Diagnostics (Q6 & P1 Q4)
 
 {_section_for("14_extreme_geometric_missingness.sql", "Extreme Global vs Foreground 3D Missingness")}
 
 {_section_for("08_depth_pointcloud_outliers.sql", "Descriptive EDA Depth & Point-Cloud Outliers")}
 
-## 6. Adaptive-Fusion Feature Assessment vs Spurious Shortcuts (P1 Q6 & Q7)
+## 8. Adaptive-Fusion Feature Assessment vs Spurious Shortcuts (P1 Q6 & Q7)
 
 {_section_for("15_fusion_feature_assessment.sql", "Candidate Adaptive-Fusion Quality Indicators vs Shortcut Risks")}
 
-## 7. Benchmark Test Defect Distributions & Retrospective Characteristics (Q7 & Q8)
+## 9. Benchmark Test Defect Distributions & Retrospective Characteristics (Q7 & Q8)
 
 {_section_for("06_defect_distribution.sql", "Defect-Type Distribution in Labeled Benchmark Test Data")}
 
@@ -592,11 +779,11 @@ Note: The `test/good` vs `test/anomalous` columns below are strictly retrospecti
 
 {_section_for("09_defect_geometry_texture.sql", "Retrospective Defect Type vs Measured Geometry & Texture")}
 
-## 8. Pipeline Stage Execution Performance (Q9)
+## 10. Pipeline Stage Execution Performance (Q9)
 
 {_section_for("07_pipeline_performance.sql", "Authoritative Pipeline Stage Performance (Non-NULL Durations)")}
 
-## 9. Quality Distributions Across Preprocessing Versions (Q10)
+## 11. Quality Distributions Across Preprocessing Versions (Q10)
 
 {_section_for("10_version_quality_comparison.sql", "Version-to-Version Quality Comparison")}
 
@@ -608,9 +795,9 @@ Note: The `test/good` vs `test/anomalous` columns below are strictly retrospecti
 
 ## Limitations
 
-1. Only the currently authorized category (`{", ".join(ingested_cats)}`) has been ingested. Do not extrapolate these distributions or correlations to un-ingested MVTec 3D-AD categories (especially organic categories).
-2. `fg_rgb` (border-referenced Otsu + morphology) is an unsupervised appearance proxy, not a ground-truth semantic segmentation mask; matte dark parts with low contrast against the table could under-segment without category-specific tuning.
-3. `fg_3d` assumes the support surface occupies valid border pixels and lies approximately on a single plane; non-planar fixtures would lower `fg_plane_inlier_ratio`.
+1. `{len(ingested_cats)}` of 10 official MVTec 3D-AD categories (`{", ".join(ingested_cats)}`) have been ingested so far. Do not extrapolate category-specific distributions, correlations, or segmentation reliability beyond the ingested categories.
+2. `fg_rgb` (border-referenced Otsu + morphology) is an unsupervised appearance proxy, not a ground-truth semantic segmentation mask; low-contrast or textured/organic objects and shadows can cause RGB-vs-3D disagreement as exposed in the failure cases above.
+3. `fg_3d` assumes the support surface occupies valid border pixels and lies approximately on a single plane; thin objects, recessed features, or non-planar fixtures can reduce `fg_3d` coverage or `fg_plane_inlier_ratio`.
 4. Observational rank correlations and distribution-shift tests identify statistical confounding and shortcut risks, not physical root causes.
 """
 
