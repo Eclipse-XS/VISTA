@@ -1,0 +1,54 @@
+{
+  "category": "cable_gland",
+  "figure": "fg_diagnostics_cable_gland.png",
+  "cases": [
+    {
+      "role": "High-IoU train/good",
+      "sample_key": "1.0.0:cable_gland:train:good:174",
+      "split": "train",
+      "defect_type": "good",
+      "fg_rgb_3d_iou": 0.9215,
+      "fg_area_pct": 15.34,
+      "fg_3d_area_pct": 16.27,
+      "fg_missing_3d_pct": 1.02,
+      "bg_missing_3d_pct": 45.6,
+      "fg_plane_inlier_ratio": 1.0
+    },
+    {
+      "role": "High-IoU test/defect",
+      "sample_key": "1.0.0:cable_gland:test:cut:020",
+      "split": "test",
+      "defect_type": "cut",
+      "fg_rgb_3d_iou": 0.9316,
+      "fg_area_pct": 15.71,
+      "fg_3d_area_pct": 16.45,
+      "fg_missing_3d_pct": 1.23,
+      "bg_missing_3d_pct": 52.75,
+      "fg_plane_inlier_ratio": 1.0
+    },
+    {
+      "role": "Lowest IoU (failure case)",
+      "sample_key": "1.0.0:cable_gland:train:good:081",
+      "split": "train",
+      "defect_type": "good",
+      "fg_rgb_3d_iou": 0.7153,
+      "fg_area_pct": 11.69,
+      "fg_3d_area_pct": 14.85,
+      "fg_missing_3d_pct": 1.29,
+      "bg_missing_3d_pct": 38.3,
+      "fg_plane_inlier_ratio": 1.0
+    },
+    {
+      "role": "Max FG 3D Missing (edge case)",
+      "sample_key": "1.0.0:cable_gland:train:good:199",
+      "split": "train",
+      "defect_type": "good",
+      "fg_rgb_3d_iou": 0.8219,
+      "fg_area_pct": 12.29,
+      "fg_3d_area_pct": 13.53,
+      "fg_missing_3d_pct": 4.23,
+      "bg_missing_3d_pct": 45.21,
+      "fg_plane_inlier_ratio": 1.0
+    }
+  ]
+}

@@ -25,7 +25,7 @@ from vista.config import (
 )
 from vista.ingestion.ingestor import ingest_category_to_bronze
 from vista.metadata.database import DatabaseSessionManager, create_db_engine, init_db
-from vista.metadata.models import ArtifactLineage, Sample, SilverArtifact, ValidationResult
+from vista.metadata.models import ArtifactLineage, Sample, SilverArtifact
 from vista.metadata.repository import MetadataRepository
 from vista.preprocessing.processor import transform_category_to_silver
 from vista.quality.extractor import extract_category_quality
@@ -272,25 +272,32 @@ def test_full_pipeline_idempotency_quarantine_resume_and_dbt(tmp_path: Path) -> 
     with db.session() as sess:
         MetadataRepository(sess).finish_pipeline_run("run-1", "SUCCEEDED")
 
-    # 5. Gold Parquet export + label leakage check
-    exports = publish_gold_datasets(cfg=cfg, storage=storage, db=db, run_id="run-1")
-    export_map = {e.table_name: e for e in exports}
+    # 5. Immutable Gold Snapshot export + label leakage & contract check
+    snapshot = publish_gold_datasets(cfg=cfg, storage=storage, db=db, run_id="run-1")
+    assert snapshot.status == "COMMITTED"
+    export_map = {e.table_name: e for e in snapshot.tables}
     assert export_map["samples"].row_count == 9
     assert export_map["silver_artifacts"].row_count == 6
+    assert export_map["normalization_artifacts"].row_count == 1
     # Only clean non-leaking train/validation samples (2 train + 2 val = 4)
     assert export_map["training_ready_samples"].row_count == 4
+    # Held-out clean non-leaking test samples (test/good/000 + test/hole/000 = 2)
+    assert export_map["evaluation_samples"].row_count == 2
 
     train_tbl = pq.read_table(export_map["training_ready_samples"].local_path)
     assert "defect_type" not in train_tbl.column_names
     assert "is_anomalous_benchmark" not in train_tbl.column_names
+    assert "z_mean_robust_z" not in train_tbl.column_names
+    assert set(train_tbl.column("partition").to_pylist()) == {"train", "validation"}
     assert set(train_tbl.column("split").to_pylist()).issubset({"train", "validation"})
 
-    # 6. dbt build + all 10 analytical SQL queries against DuckDB
-    dbt_res = run_dbt_build(cfg)
+    # 6. dbt build + all 16 analytical SQL queries against DuckDB
+    dbt_res = run_dbt_build(cfg, snapshot_dir=snapshot.local_snapshot_dir)
     assert dbt_res["returncode"] == 0
     sql_res = execute_analytical_sql_suite(cfg)
-    assert len(sql_res) == 10
+    assert len(sql_res) == 16
     assert len(sql_res["01_dataset_inventory.sql"].rows) == 3
+    assert "16_cross_category_organic_vs_manufactured.sql" in sql_res
 
     con = duckdb.connect(dbt_res["duckdb_path"], read_only=True)
     try:

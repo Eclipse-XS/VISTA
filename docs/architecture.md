@@ -17,30 +17,37 @@ Official MVTec 3D-AD (.tar.xz per category)
         │
         ▼
 [3. Multimodal Validation]          ──► PostgreSQL (validation_results) + quarantine_manifest.json
-   - RGB/XYZ/GT presence & decoding     - PASS / WARN / QUARANTINE / FAIL
+   - RGB/XYZ/GT presence & class_ids    - PASS / WARN / QUARANTINE / FAIL
    - Spatial alignment, NaN/Inf/bounds  - Exact/near duplicate & cross-split leakage checks
         │
         ▼
 [4. Silver Layer — Reproducible]    ──► gdrive:VISTA MVTEC3D/silver/mvtec_3d_ad/<ver>_<hash>/<cat>/
    - Aligned float32 depth maps         - Deterministic fixed-ZIP-timestamp .npz bundles
-   - Valid-neighbor gated normal maps   - Bronze -> Silver lineage edges in PostgreSQL
+   - Valid-neighbor gated normal maps   - Per-split deterministic .tar shards + Bronze->Silver lineage
         │
         ▼
-[5. Quality Metrics & Gold Layer]   ──► gdrive:VISTA MVTEC3D/gold/mvtec_3d_ad/<ver>/*.parquet
-   - Unsupervised RGB & 3D metrics      - Explicit PyArrow schemas + verified row counts
-   - Label-isolated training dataset    - MLflow snapshot hook (tags, URIs, metrics)
+[5. Quality & Train-Only Norm]      ──► PostgreSQL (quality_metrics, normalization_artifacts, ml_normalized_features)
+   - Raw global & foreground metrics    - Unsupervised RGB Otsu + 3D plane-residual foreground proxies
+   - Frozen train-only ML parameters    - Strictly invariant to validation & test distributions
         │
         ▼
-[6. Analytical Warehouse & EDA]     ──► DuckDB + dbt (dim_*, fct_*, mart_*) -> SQL + Reports + Charts
+[6. Immutable Gold Snapshots]       ──► gdrive:VISTA MVTEC3D/gold/mvtec_3d_ad/snapshots/<snapshot_id>/
+   - Atomic staged -> committed commit  - Content-addressed ID, manifest.json (uploaded last), schemas.json
+   - Separate train/val & test tables   - MLflow snapshot provenance hook + PyTorch-ready loader contracts
+        │
+        ▼
+[7. Analytical Warehouse & EDA]     ──► DuckDB + dbt (dim_*, fct_*, mart_*) -> 15 SQL queries + Reports + Charts
+   - Post-publish telemetry cutoff      - PostgreSQL <-> DuckDB operational consistency assertions
 ```
 
 ## Operational Metadata (PostgreSQL 16)
 
-Large binary payloads (images, XYZ TIFFs, depth/normal arrays) are **never** stored as PostgreSQL BLOBs. PostgreSQL holds normalized operational state, checksums, and lineage:
+Large binary payloads are **never** stored as PostgreSQL BLOBs. PostgreSQL tracks 15 normalized operational, provenance, and contract tables:
 
 - `dataset_versions`, `categories`
-- `pipeline_runs`, `stage_runs` (with checkpoints and stage durations)
+- `pipeline_runs`, `stage_runs` (with `attempt_number`, `is_retry`, canonical statuses: `RUNNING`, `SUCCEEDED`, `FAILED`, `INTERRUPTED`, `SKIPPED`)
 - `bronze_archives`, `samples`, `file_manifests`
 - `validation_results`, `quality_metrics`
+- `normalization_artifacts`, `ml_normalized_features`
 - `silver_artifacts`, `artifact_lineage`
-- `gold_exports`
+- `gold_snapshots` (`STAGED` → `COMMITTED` / `FAILED`), `gold_exports`

@@ -11,6 +11,7 @@ from vista.config import StorageConfig
 from vista.storage import RcloneStorageBackend, WorkspacePathError
 
 
+@pytest.mark.live
 def test_gdrive_vista_workspace_reachable_and_confined(tmp_path: Path) -> None:
     cfg = StorageConfig.load()
     if cfg.backend != "gdrive":

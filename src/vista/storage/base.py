@@ -10,6 +10,14 @@ from pathlib import Path
 from vista.storage.paths import BronzeImmutabilityError, is_bronze_path, validate_workspace_path
 
 
+class CorruptedCacheError(RuntimeError):
+    """Raised when a local cached or restored file fails checksum verification or decoding."""
+
+
+class RemoteArtifactUnavailableError(RuntimeError):
+    """Raised when a required remote artifact cannot be located or fetched."""
+
+
 @dataclass(frozen=True)
 class RemoteObjectInfo:
     path: str

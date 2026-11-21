@@ -4,6 +4,11 @@ from pathlib import Path
 
 from vista.config import StorageConfig
 from vista.storage.base import RemoteObjectInfo, StorageBackend, md5_file, sha256_file
+from vista.storage.cache import (
+    CacheCleanupSummary,
+    CacheCleanupVerificationError,
+    cleanup_verified_category_cache,
+)
 from vista.storage.local import LocalStorageBackend
 from vista.storage.paths import (
     ALLOWED_WORKSPACE_PREFIXES,
@@ -18,6 +23,14 @@ from vista.storage.paths import (
     validate_workspace_path,
 )
 from vista.storage.rclone import RcloneStorageBackend
+from vista.storage.recovery import (
+    ArchiveSecurityError,
+    ArtifactRecoveryManager,
+    IndexedTarShard,
+    parse_shard_member_uri,
+    safe_extract_tar_member,
+    validate_archive_member_path,
+)
 
 
 def build_storage_backend(config: StorageConfig | None = None) -> StorageBackend:
@@ -32,7 +45,12 @@ def build_storage_backend(config: StorageConfig | None = None) -> StorageBackend
 
 __all__ = [
     "ALLOWED_WORKSPACE_PREFIXES",
+    "ArchiveSecurityError",
+    "ArtifactRecoveryManager",
     "BronzeImmutabilityError",
+    "CacheCleanupSummary",
+    "CacheCleanupVerificationError",
+    "IndexedTarShard",
     "LocalStorageBackend",
     "RcloneStorageBackend",
     "RemoteObjectInfo",
@@ -43,10 +61,14 @@ __all__ = [
     "bronze_manifest_path",
     "bronze_raw_sample_path",
     "build_storage_backend",
+    "cleanup_verified_category_cache",
     "gold_table_path",
     "is_bronze_path",
     "md5_file",
+    "parse_shard_member_uri",
+    "safe_extract_tar_member",
     "sha256_file",
     "silver_artifact_path",
+    "validate_archive_member_path",
     "validate_workspace_path",
 ]
