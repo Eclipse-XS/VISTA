@@ -24,7 +24,7 @@ from vista.storage.base import (
     md5_file,
     sha256_file,
 )
-from vista.storage.budget import BudgetCheckResult, LocalCacheBudgetManager
+from vista.storage.budget import BudgetCheckResult, BudgetReservation, LocalCacheBudgetManager
 from vista.storage.cache import (
     CacheCleanupSummary,
     CacheCleanupVerificationError,
@@ -73,6 +73,7 @@ __all__ = [
     "ArtifactRecoveryManager",
     "BronzeImmutabilityError",
     "BudgetCheckResult",
+    "BudgetReservation",
     "CacheCleanupSummary",
     "CacheCleanupVerificationError",
     "CorruptedCacheError",

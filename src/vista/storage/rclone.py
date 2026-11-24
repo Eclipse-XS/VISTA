@@ -544,11 +544,27 @@ class RcloneStorageBackend(StorageBackend):
 
         # Process- and thread-safe unique staging file to prevent concurrent worker collisions
         part_path = atomic_temp_path(local_dest)
+        copy_args = ["copyto", self._remote_spec(normalized), self._local_arg(part_path)]
         try:
-            self._run_rclone(
-                ["copyto", self._remote_spec(normalized), self._local_arg(part_path)],
-                target_path=normalized,
-            )
+            try:
+                self._run_rclone(copy_args, target_path=normalized)
+            except StorageNotFoundError as exc:
+                # Google Drive API can transiently miss deeply-nested parent folder lookups on
+                # `copyto` ("error reading source root directory: directory not found") under burst
+                # load even when the file exists. Confirm via stat() before failing closed.
+                if self.config.backend == "gdrive" and "error reading source root directory" in str(exc).lower():
+                    time.sleep(2.0)
+                    if self.stat(normalized) is not None:
+                        log.warning(
+                            "gdrive_transient_path_lookup_retry",
+                            path=normalized,
+                            error=str(exc),
+                        )
+                        self._run_rclone(copy_args, target_path=normalized)
+                    else:
+                        raise
+                else:
+                    raise
             part_path.replace(local_dest)
             return local_dest
         finally:

@@ -13,6 +13,7 @@ and verifies real `rclone` S3 operations:
 from __future__ import annotations
 
 import hashlib
+import os
 import shutil
 import socket
 import tarfile
@@ -230,9 +231,13 @@ def _host_ip_reachable_from_wsl() -> str:
         return "127.0.0.1"
 
 
+@pytest.mark.s3_compat
 def test_rclone_s3_compatible_end_to_end_upload_snapshot_multipart_and_recovery(tmp_path: Path) -> None:
+    require_s3 = os.environ.get("VISTA_REQUIRE_S3_RCLONE") == "1"
     avail, wsl_distro = _rclone_available()
     if not avail:
+        if require_s3:
+            pytest.fail("rclone binary is required (VISTA_REQUIRE_S3_RCLONE=1) but was not found on PATH or WSL")
         pytest.skip("rclone binary not available in this environment")
 
     state = _MiniS3State(tmp_path / "s3_store")
@@ -268,6 +273,8 @@ def test_rclone_s3_compatible_end_to_end_upload_snapshot_multipart_and_recovery(
                     timeout=8,
                 )
                 if probe2.stdout.strip() != "200":
+                    if require_s3:
+                        pytest.fail("WSL2 cannot reach Windows loopback/LAN S3 test server (VISTA_REQUIRE_S3_RCLONE=1)")
                     pytest.skip("WSL2 cannot reach Windows loopback/LAN S3 test server (Windows firewall)")
 
         s3_env = {

@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import json
 import tarfile
+from contextlib import ExitStack, nullcontext
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 
@@ -356,6 +357,7 @@ class ArtifactRecoveryManager:
                     path=norm_remote,
                 )
 
+            reserve_ctx: Any = nullcontext()
             if self.budget_manager is not None:
                 est_sz = expected_size_bytes
                 if est_sz is None:
@@ -366,48 +368,55 @@ class ArtifactRecoveryManager:
                     include_extraction=include_extraction_headroom,
                     expansion_factor=1.5 if include_extraction_headroom else 0.0,
                 )
-                self.budget_manager.ensure_space(peak_req, protected_paths={local_dest})
+                reserve_ctx = self.budget_manager.reserve_space(
+                    peak_req,
+                    label=f"download:{norm_remote}",
+                    protected_paths={local_dest},
+                )
 
             local_dest.parent.mkdir(parents=True, exist_ok=True)
             tmp_dest = atomic_temp_path(local_dest)
-            try:
-                self.storage.download_file(norm_remote, tmp_dest, skip_if_exists=False)
-                if not tmp_dest.is_file():
-                    raise RemoteArtifactUnavailableError(
-                        f"Download did not produce file for {norm_remote!r}",
-                        operation="download_verified",
-                        path=norm_remote,
-                    )
-                actual_sha = sha256_file(tmp_dest)
-                if self.verify_checksums and expected_sha256 is not None:
-                    if actual_sha != expected_sha256:
-                        raise CorruptedCacheError(
-                            f"Downloaded remote artifact {norm_remote!r} SHA-256 mismatch: "
-                            f"expected={expected_sha256}, actual={actual_sha}",
+            with reserve_ctx as reservation:
+                try:
+                    self.storage.download_file(norm_remote, tmp_dest, skip_if_exists=False)
+                    if not tmp_dest.is_file():
+                        raise RemoteArtifactUnavailableError(
+                            f"Download did not produce file for {norm_remote!r}",
                             operation="download_verified",
                             path=norm_remote,
                         )
-                tmp_dest.replace(local_dest)
-                if self.budget_manager is not None:
-                    self.budget_manager.record_artifact(
-                        local_dest,
-                        sha256=actual_sha,
-                        verified_remote=True,
-                        kind="remote_cache",
-                    )
-                return local_dest
-            except (CorruptedCacheError, RemoteArtifactUnavailableError):
-                if tmp_dest.exists():
-                    tmp_dest.unlink(missing_ok=True)
-                raise
-            except Exception as exc:  # noqa: BLE001
-                if tmp_dest.exists():
-                    tmp_dest.unlink(missing_ok=True)
-                raise RemoteArtifactUnavailableError(
-                    f"Failed to download remote artifact {norm_remote!r}: {exc}",
-                    operation="download_verified",
-                    path=norm_remote,
-                ) from exc
+                    actual_sha = sha256_file(tmp_dest)
+                    if self.verify_checksums and expected_sha256 is not None:
+                        if actual_sha != expected_sha256:
+                            raise CorruptedCacheError(
+                                f"Downloaded remote artifact {norm_remote!r} SHA-256 mismatch: "
+                                f"expected={expected_sha256}, actual={actual_sha}",
+                                operation="download_verified",
+                                path=norm_remote,
+                            )
+                    tmp_dest.replace(local_dest)
+                    if reservation is not None:
+                        reservation.reconcile(local_dest.stat().st_size)
+                    if self.budget_manager is not None:
+                        self.budget_manager.record_artifact(
+                            local_dest,
+                            sha256=actual_sha,
+                            verified_remote=True,
+                            kind="remote_cache",
+                        )
+                    return local_dest
+                except (CorruptedCacheError, RemoteArtifactUnavailableError):
+                    if tmp_dest.exists():
+                        tmp_dest.unlink(missing_ok=True)
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    if tmp_dest.exists():
+                        tmp_dest.unlink(missing_ok=True)
+                    raise RemoteArtifactUnavailableError(
+                        f"Failed to download remote artifact {norm_remote!r}: {exc}",
+                        operation="download_verified",
+                        path=norm_remote,
+                    ) from exc
 
     def _resolve_silver_shard_spec(
         self,
@@ -492,10 +501,13 @@ class ArtifactRecoveryManager:
         explicit_shard_relpath: str | None = None,
         explicit_member_path: str | None = None,
         hydrate_full_split: bool = False,
+        lease_stack: ExitStack | None = None,
     ) -> Path:
         """Resolve local Silver `.npz`, restoring process-safely from verified remote `.tar` shard."""
         norm_silver = validate_workspace_path(silver_relpath)
         local_npz = self.local_silver_root / norm_silver.removeprefix("silver/")
+        if lease_stack is not None and self.budget_manager is not None:
+            lease_stack.enter_context(self.budget_manager.acquire_lease(local_npz))
         if local_npz.is_file():
             if self.verify_checksums and expected_member_sha256:
                 actual = sha256_file(local_npz)
@@ -602,6 +614,7 @@ class ArtifactRecoveryManager:
         explicit_archive_relpath: str | None = None,
         include_gt: bool = False,
         include_xyz: bool = False,
+        lease_stack: ExitStack | None = None,
     ) -> Path:
         """Resolve local Bronze RGB/GT file, restoring safely & process-safely from Bronze `.tar.xz`."""
         norm_rel = validate_archive_member_path(relpath)
@@ -611,6 +624,8 @@ class ArtifactRecoveryManager:
         ]
         found = next((p for p in candidates if p.is_file()), None)
         if found is not None:
+            if lease_stack is not None and self.budget_manager is not None:
+                lease_stack.enter_context(self.budget_manager.acquire_lease(found))
             if self.verify_checksums and expected_sha256:
                 actual = sha256_file(found)
                 if actual != expected_sha256:
@@ -637,6 +652,8 @@ class ArtifactRecoveryManager:
         )
         dest_cat_root = self.local_bronze_root / "mvtec_3d_ad" / category / category
         restored = dest_cat_root / norm_rel
+        if lease_stack is not None and self.budget_manager is not None:
+            lease_stack.enter_context(self.budget_manager.acquire_lease(restored))
 
         with interprocess_file_lock(self._lock_for(f"bronze_extract:{category}:{split}:{include_gt}")):
             if restored.is_file():

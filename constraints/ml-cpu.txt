@@ -1,0 +1,4 @@
+# Optional CPU-only PyTorch constraint for VISTA ML DataLoader verification & future training.
+# Install with:
+#   pip install --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple -c constraints/ml-cpu.txt torch
+torch==2.15.0+cpu

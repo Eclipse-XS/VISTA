@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import tarfile
+from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -168,71 +169,89 @@ def ingest_category_to_bronze(
         min_free_disk_bytes=int(cfg.min_free_disk_gb * (1024**3)),
     )
 
-    if local_archive_override is not None:
-        archive_path = local_archive_override.resolve()
-        if not archive_path.is_file():
-            raise FileNotFoundError(f"Archive override not found: {archive_path}")
-        archive_size = archive_path.stat().st_size
-        archive_sha256 = sha256_file(archive_path)
-        archive_md5 = md5_file(archive_path)
-    else:
-        probe = probe_category_source(spec)
-        if not probe.reachable:
-            raise RuntimeError(
-                f"Official MVTec 3D-AD archive unreachable for {category!r}: "
-                f"status={probe.status_code}, error={probe.error}"
+    with ExitStack() as budget_stack:
+        if local_archive_override is not None:
+            archive_path = local_archive_override.resolve()
+            if not archive_path.is_file():
+                raise FileNotFoundError(f"Archive override not found: {archive_path}")
+            archive_size = archive_path.stat().st_size
+            archive_sha256 = sha256_file(archive_path)
+            archive_md5 = md5_file(archive_path)
+            extract_req = LocalCacheBudgetManager.estimate_peak_temp_bytes(
+                archive_size, include_extraction=True, expansion_factor=2.2
+            ) - archive_size
+            budget_stack.enter_context(
+                budget_mgr.reserve_space(
+                    max(0, extract_req),
+                    label=f"ingest_extract:{category}",
+                    protected_paths={archive_path, extracted_base},
+                )
             )
-        archive_dest = cache_archive_dir / spec.archive_filename
-        est_arch_bytes = probe.content_length or (spec.approx_size_mb * 1024 * 1024)
-        peak_req = LocalCacheBudgetManager.estimate_peak_temp_bytes(
-            est_arch_bytes, include_extraction=True, expansion_factor=2.2
-        )
-        budget_mgr.ensure_space(peak_req, protected_paths={archive_dest, extracted_base})
-        dl = download_resumable(
-            spec.url,
-            archive_dest,
-            expected_size_bytes=probe.content_length,
-        )
-        archive_path = dl.local_path
-        archive_size = dl.size_bytes
-        archive_sha256 = dl.sha256
-        archive_md5 = dl.md5
+        else:
+            probe = probe_category_source(spec)
+            if not probe.reachable:
+                raise RuntimeError(
+                    f"Official MVTec 3D-AD archive unreachable for {category!r}: "
+                    f"status={probe.status_code}, error={probe.error}"
+                )
+            archive_dest = cache_archive_dir / spec.archive_filename
+            est_arch_bytes = probe.content_length or (spec.approx_size_mb * 1024 * 1024)
+            peak_req = LocalCacheBudgetManager.estimate_peak_temp_bytes(
+                est_arch_bytes, include_extraction=True, expansion_factor=2.2
+            )
+            res = budget_stack.enter_context(
+                budget_mgr.reserve_space(
+                    peak_req,
+                    label=f"ingest_download:{category}",
+                    protected_paths={archive_dest, extracted_base},
+                )
+            )
+            dl = download_resumable(
+                spec.url,
+                archive_dest,
+                expected_size_bytes=probe.content_length,
+            )
+            res.reconcile(dl.size_bytes)
+            archive_path = dl.local_path
+            archive_size = dl.size_bytes
+            archive_sha256 = dl.sha256
+            archive_md5 = dl.md5
 
-    # Upload immutable Bronze source archive to remote storage (Google Drive / S3)
-    remote_archive_rel = bronze_archive_path(category, spec.archive_filename)
-    archive_uploaded_now = False
-    if upload_archive_to_remote:
-        _, archive_uploaded_now = storage.upload_file(
-            archive_path, remote_archive_rel, overwrite=False
-        )
-    archive_remote_uri = storage.full_uri(remote_archive_rel)
+        # Upload immutable Bronze source archive to remote storage (Google Drive / S3)
+        remote_archive_rel = bronze_archive_path(category, spec.archive_filename)
+        archive_uploaded_now = False
+        if upload_archive_to_remote:
+            _, archive_uploaded_now = storage.upload_file(
+                archive_path, remote_archive_rel, overwrite=False
+            )
+        archive_remote_uri = storage.full_uri(remote_archive_rel)
 
-    # Extract into local bounded Bronze working directory (idempotent checkpoint marker)
-    marker_file = extracted_base / ".extracted.json"
-    need_extract = True
-    if marker_file.is_file():
-        try:
-            marker = json.loads(marker_file.read_text(encoding="utf-8"))
-            if marker.get("archive_sha256") == archive_sha256:
-                need_extract = False
-        except json.JSONDecodeError:
-            need_extract = True
+        # Extract into local bounded Bronze working directory (idempotent checkpoint marker)
+        marker_file = extracted_base / ".extracted.json"
+        need_extract = True
+        if marker_file.is_file():
+            try:
+                marker = json.loads(marker_file.read_text(encoding="utf-8"))
+                if marker.get("archive_sha256") == archive_sha256:
+                    need_extract = False
+            except json.JSONDecodeError:
+                need_extract = True
 
-    if need_extract:
-        log.info("extracting_bronze_archive", category=category, archive=str(archive_path))
-        _safe_extract_tar(archive_path, extracted_base)
-        marker_file.write_text(
-            json.dumps(
-                {
-                    "category": category,
-                    "archive_filename": spec.archive_filename,
-                    "archive_sha256": archive_sha256,
-                    "extracted_at": datetime.now(timezone.utc).isoformat(),
-                },
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
+        if need_extract:
+            log.info("extracting_bronze_archive", category=category, archive=str(archive_path))
+            _safe_extract_tar(archive_path, extracted_base)
+            marker_file.write_text(
+                json.dumps(
+                    {
+                        "category": category,
+                        "archive_filename": spec.archive_filename,
+                        "archive_sha256": archive_sha256,
+                        "extracted_at": datetime.now(timezone.utc).isoformat(),
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
 
     category_root = locate_category_root(extracted_base, category)
     samples = discover_category_samples(category_root, category)

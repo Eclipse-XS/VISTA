@@ -18,18 +18,77 @@ from __future__ import annotations
 
 import json
 import os
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
+
+import httpx
 
 from vista.analytics.gold_publisher import GoldSnapshotPublishResult
 from vista.config import VistaConfig
 from vista.logging import get_logger
+from vista.storage.base import interprocess_file_lock
 
 log = get_logger(__name__)
 
 
 class MLflowTrackingError(RuntimeError):
     """Raised when MLflow tracking fails under `mlflow_failure_policy='strict'`."""
+
+
+class MLflowConcurrentWriterError(MLflowTrackingError):
+    """Raised when `local` SQLite mode attempts to write while the HTTP MLflow server owns the DB."""
+
+
+def _sqlite_path_from_uri(uri: str) -> Path | None:
+    if not uri.lower().startswith("sqlite:///"):
+        return None
+    raw = uri[len("sqlite:///") :]
+    if not raw or raw == ":memory:":
+        return None
+    return Path(raw).resolve()
+
+
+def detect_active_mlflow_server(port: int, *, host: str = "127.0.0.1", timeout_s: float = 0.35) -> bool:
+    """Return True if an MLflow HTTP tracking server responds 200 OK on `/health`."""
+    try:
+        resp = httpx.get(f"http://{host}:{int(port)}/health", timeout=timeout_s)
+        return resp.status_code == 200
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def check_mlflow_server_compatibility(
+    tracking_uri: str,
+    *,
+    timeout_s: float = 3.0,
+) -> dict[str, Any]:
+    """Verify MLflow HTTP server health and compare client vs server versions."""
+    os.environ.setdefault("MLFLOW_DISABLE_AGENT_HINT", "1")
+    import mlflow
+
+    base = tracking_uri.rstrip("/")
+    client_ver = str(getattr(mlflow, "__version__", "unknown"))
+    health_resp = httpx.get(f"{base}/health", timeout=timeout_s)
+    health_ok = health_resp.status_code == 200
+    server_ver: str | None = None
+    try:
+        ver_resp = httpx.get(f"{base}/version", timeout=timeout_s)
+        if ver_resp.status_code == 200:
+            server_ver = ver_resp.text.strip()
+    except Exception:  # noqa: BLE001
+        server_ver = None
+
+    client_major = client_ver.split(".")[0] if client_ver else ""
+    server_major = server_ver.split(".")[0] if server_ver else ""
+    return {
+        "tracking_uri": base,
+        "healthy": health_ok,
+        "client_version": client_ver,
+        "server_version": server_ver,
+        "major_compatible": bool(server_ver and client_major == server_major),
+        "exact_match": bool(server_ver and client_ver == server_ver),
+    }
 
 
 def _read_snapshot_provenance(snapshot: GoldSnapshotPublishResult) -> tuple[str, str]:
@@ -69,70 +128,98 @@ def log_gold_snapshot_to_mlflow(
         return None
 
     try:
-        if cfg.mlflow_tracking_uri.startswith("sqlite:///"):
-            db_file = cfg.mlflow_tracking_uri.removeprefix("sqlite:///")
-            Path(db_file).parent.mkdir(parents=True, exist_ok=True)
+        sqlite_db = _sqlite_path_from_uri(cfg.mlflow_tracking_uri)
+        lock_ctx: Any = nullcontext()
+        if sqlite_db is not None:
+            sqlite_db.parent.mkdir(parents=True, exist_ok=True)
+            shared_workspace_db = (cfg.project_root / "mlruns" / "mlflow.db").resolve()
+            if (
+                cfg.mlflow_mode == "local"
+                and sqlite_db == shared_workspace_db
+                and detect_active_mlflow_server(cfg.mlflow_port)
+            ):
+                raise MLflowConcurrentWriterError(
+                    f"Blocked direct local SQLite MLflow write to {sqlite_db}: an MLflow HTTP "
+                    f"server is actively listening on http://127.0.0.1:{cfg.mlflow_port}. "
+                    f"Switch to VISTA_MLFLOW_MODE=server or stop the MLflow server before using local mode."
+                )
+            lock_ctx = interprocess_file_lock(sqlite_db.with_suffix(".db.vista.lock"), timeout_s=30.0)
 
         code_prov, contract_ver = _read_snapshot_provenance(snapshot)
-        mlflow.set_tracking_uri(cfg.mlflow_tracking_uri)
-        mlflow.set_experiment(cfg.mlflow_experiment)
+        with lock_ctx:
+            mlflow.set_tracking_uri(cfg.mlflow_tracking_uri)
+            mlflow.set_experiment(cfg.mlflow_experiment)
 
-        with mlflow.start_run(run_name=f"de_{category}_{snapshot.snapshot_id}") as ml_run:
-            mlflow.set_tags(
-                {
-                    "vista.phase": "data_engineering",
-                    "vista.pipeline_run_id": run_id,
-                    "vista.category": category,
-                    "vista.dataset_name": cfg.dataset_name,
-                    "vista.dataset_version": cfg.dataset_version,
-                    "vista.contract_version": contract_ver,
-                    "vista.code_provenance": code_prov,
-                    "vista.mlflow_mode": cfg.mlflow_mode,
-                    "vista.snapshot_id": snapshot.snapshot_id,
-                    "vista.snapshot_status": snapshot.status,
-                    "vista.snapshot_reused_existing": str(snapshot.reused_existing).lower(),
-                    "vista.snapshot_data_digest": snapshot.data_content_digest,
-                    "vista.snapshot_remote_prefix": snapshot.remote_prefix_uri,
-                    "vista.snapshot_manifest_uri": snapshot.manifest_remote_uri,
-                    "vista.snapshot_manifest_sha256": snapshot.manifest_sha256,
-                    "vista.train_manifest_hashes": json.dumps(
-                        snapshot.train_manifest_hashes, sort_keys=True
-                    ),
-                    "vista.storage_backend": cfg.storage.backend,
-                    "vista.storage_workspace": cfg.storage.remote_uri,
-                }
-            )
-            mlflow.log_params(
-                {
-                    "snapshot_id": snapshot.snapshot_id,
-                    "contract_version": contract_ver,
-                    "code_provenance": code_prov,
-                    "preprocessing_version": cfg.preprocessing.version,
-                    "preprocessing_config_hash": cfg.preprocessing.config_hash,
-                    "normal_max_step_meters": cfg.preprocessing.normal_max_step_meters,
-                    "zero_depth_epsilon": cfg.preprocessing.zero_depth_epsilon,
-                }
-            )
-            metrics: dict[str, float] = {}
-            for exp in snapshot.tables:
-                metrics[f"gold_rows.{exp.table_name}"] = float(exp.row_count)
-                mlflow.set_tag(f"gold_uri.{exp.table_name}", exp.remote_uri)
-                mlflow.set_tag(f"gold_sha256.{exp.table_name}", exp.sha256)
-            if extra_metrics:
-                for k, v in extra_metrics.items():
-                    metrics[k] = float(v)
-            if metrics:
-                mlflow.log_metrics(metrics)
+            with mlflow.start_run(run_name=f"de_{category}_{snapshot.snapshot_id}") as ml_run:
+                mlflow.set_tags(
+                    {
+                        "vista.phase": "data_engineering",
+                        "vista.pipeline_run_id": run_id,
+                        "vista.category": category,
+                        "vista.dataset_name": cfg.dataset_name,
+                        "vista.dataset_version": cfg.dataset_version,
+                        "vista.contract_version": contract_ver,
+                        "vista.code_provenance": code_prov,
+                        "vista.mlflow_mode": cfg.mlflow_mode,
+                        "vista.snapshot_id": snapshot.snapshot_id,
+                        "vista.snapshot_status": snapshot.status,
+                        "vista.snapshot_reused_existing": str(snapshot.reused_existing).lower(),
+                        "vista.snapshot_data_digest": snapshot.data_content_digest,
+                        "vista.snapshot_remote_prefix": snapshot.remote_prefix_uri,
+                        "vista.snapshot_manifest_uri": snapshot.manifest_remote_uri,
+                        "vista.snapshot_manifest_sha256": snapshot.manifest_sha256,
+                        "vista.train_manifest_hashes": json.dumps(
+                            snapshot.train_manifest_hashes, sort_keys=True
+                        ),
+                        "vista.storage_backend": cfg.storage.backend,
+                        "vista.storage_workspace": cfg.storage.remote_uri,
+                    }
+                )
+                mlflow.log_params(
+                    {
+                        "snapshot_id": snapshot.snapshot_id,
+                        "contract_version": contract_ver,
+                        "code_provenance": code_prov,
+                        "preprocessing_version": cfg.preprocessing.version,
+                        "preprocessing_config_hash": cfg.preprocessing.config_hash,
+                        "normal_max_step_meters": cfg.preprocessing.normal_max_step_meters,
+                        "zero_depth_epsilon": cfg.preprocessing.zero_depth_epsilon,
+                    }
+                )
+                metrics: dict[str, float] = {}
+                for exp in snapshot.tables:
+                    metrics[f"gold_rows.{exp.table_name}"] = float(exp.row_count)
+                    mlflow.set_tag(f"gold_uri.{exp.table_name}", exp.remote_uri)
+                    mlflow.set_tag(f"gold_sha256.{exp.table_name}", exp.sha256)
+                if extra_metrics:
+                    for k, v in extra_metrics.items():
+                        metrics[k] = float(v)
+                if metrics:
+                    mlflow.log_metrics(metrics)
 
-            log.info(
-                "mlflow_snapshot_logged",
-                mlflow_run_id=ml_run.info.run_id,
-                mlflow_mode=cfg.mlflow_mode,
-                snapshot_id=snapshot.snapshot_id,
-                category=category,
-                code_provenance=code_prov,
-            )
-            return ml_run.info.run_id
+                log.info(
+                    "mlflow_snapshot_logged",
+                    mlflow_run_id=ml_run.info.run_id,
+                    mlflow_mode=cfg.mlflow_mode,
+                    snapshot_id=snapshot.snapshot_id,
+                    category=category,
+                    code_provenance=code_prov,
+                )
+                return ml_run.info.run_id
+    except MLflowConcurrentWriterError as exc:
+        log.error(
+            "mlflow_sqlite_concurrent_writer_blocked",
+            failure_category="SQLITE_CONCURRENT_WRITER_BLOCKED",
+            mlflow_mode=cfg.mlflow_mode,
+            tracking_uri=cfg.mlflow_tracking_uri,
+            mlflow_port=cfg.mlflow_port,
+            failure_policy=cfg.mlflow_failure_policy,
+            snapshot_id=snapshot.snapshot_id,
+            error=str(exc),
+        )
+        if cfg.mlflow_failure_policy == "strict":
+            raise
+        return None
     except Exception as exc:  # noqa: BLE001
         log.error(
             "mlflow_tracking_failed",

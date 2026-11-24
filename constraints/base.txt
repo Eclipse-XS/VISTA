@@ -1,0 +1,33 @@
+# Cross-platform reproducible dependency constraints for VISTA Data Engineering (Python 3.11-3.13)
+# Verified on Ubuntu 24.04 (Python 3.12 CI) and Windows 11 (Python 3.13.5 local workstation).
+# Install with: pip install -e ".[dev]" -c constraints/base.txt
+
+# Core scientific & multimodal array stack
+numpy==2.5.5
+scipy==1.18.1
+pyarrow==26.0.1
+opencv-python-headless==5.1.0.95
+tifffile==2026.11.16
+pillow==13.0.0
+matplotlib==3.11.2
+
+# Operational metadata & analytical warehouse
+psycopg==3.3.9
+psycopg-binary==3.3.9
+sqlalchemy==2.1.9
+duckdb==2.0.0
+dbt-duckdb==1.11.1
+dbt-core==1.12.7
+
+# Configuration, HTTP, structured logging
+PyYAML==6.0.3
+httpx==0.28.1
+structlog==26.1.0
+
+# Orchestration & experiment tracking (matched to compose.yaml ghcr.io/mlflow/mlflow:v3.18.0)
+prefect==3.9.4
+mlflow-skinny==3.18.0
+
+# Development & verification tools
+pytest==9.2.0
+ruff==0.17.6

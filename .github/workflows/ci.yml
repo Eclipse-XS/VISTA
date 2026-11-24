@@ -7,7 +7,8 @@ on:
     branches: ["main"]
 
 jobs:
-  verify:
+  core:
+    name: Core (lint, hygiene, unit, offline E2E, dbt)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -19,10 +20,10 @@ jobs:
           python-version: "3.12"
           cache: "pip"
 
-      - name: Install VISTA and dev dependencies
+      - name: Install VISTA and dev dependencies (constrained)
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev]"
+          pip install -e ".[dev]" -c constraints/base.txt
 
       - name: Static lint check (Ruff)
         run: ruff check src tests scripts
@@ -30,5 +31,101 @@ jobs:
       - name: Repository secret & large-artifact hygiene check
         run: python scripts/check_repo_hygiene.py
 
-      - name: Run unit, offline integration, and dbt fixture tests (no live credentials)
-        run: pytest -m "not live" -v
+      - name: Run core unit, offline integration, and dbt fixture tests (0 skips allowed)
+        run: |
+          pytest -m "not live and not postgres and not s3_compat and not ml_loader and not mlflow_server" -v -rs
+
+  postgres:
+    name: PostgreSQL (clean install, migrations, idempotency)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: vista_metadata
+          POSTGRES_USER: vista
+          POSTGRES_PASSWORD: vista_ci_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U vista -d vista_metadata"
+          --health-interval=5s
+          --health-timeout=3s
+          --health-retries=10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install VISTA and dev dependencies (constrained)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]" -c constraints/base.txt
+
+      - name: Run mandatory PostgreSQL clean-install & migration suite
+        env:
+          VISTA_PG_HOST: 127.0.0.1
+          VISTA_PG_PORT: "5432"
+          VISTA_PG_DB: vista_metadata
+          VISTA_PG_USER: vista
+          VISTA_PG_PASSWORD: vista_ci_password
+          VISTA_REQUIRE_POSTGRES: "1"
+        run: pytest -m postgres -v -rs
+
+  storage-s3-compat:
+    name: Storage Portability (rclone S3-compatible E2E)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install rclone
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y rclone
+          rclone version
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install VISTA and dev dependencies (constrained)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]" -c constraints/base.txt
+
+      - name: Run mandatory rclone S3-compatible integration suite
+        env:
+          VISTA_REQUIRE_S3_RCLONE: "1"
+        run: pytest -m s3_compat -v -rs
+
+  ml-loader:
+    name: ML DataLoader (CPU PyTorch multiworker 0/2/4)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install VISTA, dev deps, and CPU-only PyTorch (constrained)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]" -c constraints/base.txt
+          pip install --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple -c constraints/ml-cpu.txt torch
+
+      - name: Run mandatory PyTorch DataLoader multiworker suite
+        env:
+          VISTA_REQUIRE_TORCH: "1"
+        run: pytest -m ml_loader -v -rs

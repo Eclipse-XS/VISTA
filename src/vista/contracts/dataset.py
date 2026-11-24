@@ -22,6 +22,7 @@ Safety & recovery guarantees:
 from __future__ import annotations
 
 import json
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -202,6 +203,7 @@ class VistaMultimodalDataset:
         expected_sha256: str | None,
         archive_relpath: str | None = None,
         include_gt: bool = False,
+        lease_stack: ExitStack | None = None,
     ) -> Path:
         return self._recovery.restore_bronze_file(
             category=category,
@@ -210,9 +212,12 @@ class VistaMultimodalDataset:
             expected_sha256=expected_sha256,
             explicit_archive_relpath=archive_relpath,
             include_gt=include_gt,
+            lease_stack=lease_stack,
         )
 
-    def _resolve_silver_bundle(self, record: dict[str, Any]) -> Path:
+    def _resolve_silver_bundle(
+        self, record: dict[str, Any], *, lease_stack: ExitStack | None = None
+    ) -> Path:
         return self._recovery.restore_silver_member(
             category=str(record["category_name"]),
             split=str(record["split"]),
@@ -221,6 +226,7 @@ class VistaMultimodalDataset:
             explicit_shard_relpath=record.get("silver_shard_relpath"),
             explicit_member_path=record.get("silver_member_path"),
             hydrate_full_split=(self.hydrate_mode == "category"),
+            lease_stack=lease_stack,
         )
 
     def __getitem__(self, index: int) -> MultimodalSample:
@@ -230,53 +236,58 @@ class VistaMultimodalDataset:
         arch_rel = rec.get("bronze_archive_relpath")
         need_gt = self.partition == "test" and self.include_benchmark_labels
 
-        rgb_path = self._resolve_bronze_file(
-            category=cat,
-            split=split,
-            relpath=str(rec["rgb_relpath"]),
-            expected_sha256=rec.get("rgb_sha256"),
-            archive_relpath=arch_rel,
-            include_gt=need_gt,
-        )
-        buf = np.fromfile(str(rgb_path), dtype=np.uint8)
-        bgr = cv2.imdecode(buf, cv2.IMREAD_COLOR)
-        if bgr is None:
-            raise CorruptedCacheError(f"Failed to decode RGB image at {rgb_path}")
-        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        # Hold active worker leases across the ENTIRE file-read & decode lifecycle so
+        # concurrent LRU eviction or cache cleanup cannot delete files being read.
+        with ExitStack() as lease_stack:
+            rgb_path = self._resolve_bronze_file(
+                category=cat,
+                split=split,
+                relpath=str(rec["rgb_relpath"]),
+                expected_sha256=rec.get("rgb_sha256"),
+                archive_relpath=arch_rel,
+                include_gt=need_gt,
+                lease_stack=lease_stack,
+            )
+            buf = np.fromfile(str(rgb_path), dtype=np.uint8)
+            bgr = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+            if bgr is None:
+                raise CorruptedCacheError(f"Failed to decode RGB image at {rgb_path}")
+            rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
 
-        silver_path = self._resolve_silver_bundle(rec)
-        arrays = validate_silver_npz_contract(
-            silver_path,
-            expected_sha256=rec.get("silver_sha256") if self.verify_checksums else None,
-            expected_hw=(rgb.shape[0], rgb.shape[1]),
-        )
+            silver_path = self._resolve_silver_bundle(rec, lease_stack=lease_stack)
+            arrays = validate_silver_npz_contract(
+                silver_path,
+                expected_sha256=rec.get("silver_sha256") if self.verify_checksums else None,
+                expected_hw=(rgb.shape[0], rgb.shape[1]),
+            )
 
-        ml_feats = {col: rec.get(col) for col in ML_FEATURE_COLUMNS}
+            ml_feats = {col: rec.get(col) for col in ML_FEATURE_COLUMNS}
 
-        defect_type: str | None = None
-        is_anom: bool | None = None
-        gt_mask: np.ndarray | None = None
-        if need_gt:
-            defect_type = rec.get("defect_type")
-            is_anom = rec.get("is_anomalous_benchmark")
-            gt_rel = rec.get("gt_relpath")
-            if gt_rel:
-                gt_path = self._resolve_bronze_file(
-                    category=cat,
-                    split=split,
-                    relpath=str(gt_rel),
-                    expected_sha256=rec.get("gt_sha256"),
-                    archive_relpath=arch_rel,
-                    include_gt=True,
-                )
-                gt_buf = np.fromfile(str(gt_path), dtype=np.uint8)
-                gt_mask = cv2.imdecode(gt_buf, cv2.IMREAD_UNCHANGED)
-                if gt_mask is None:
-                    raise CorruptedCacheError(f"Failed to decode GT mask at {gt_path}")
-                if gt_mask.shape[:2] != rgb.shape[:2]:
-                    raise DataContractViolationError(
-                        f"GT mask spatial mismatch: {gt_mask.shape[:2]} != RGB {rgb.shape[:2]}"
+            defect_type: str | None = None
+            is_anom: bool | None = None
+            gt_mask: np.ndarray | None = None
+            if need_gt:
+                defect_type = rec.get("defect_type")
+                is_anom = rec.get("is_anomalous_benchmark")
+                gt_rel = rec.get("gt_relpath")
+                if gt_rel:
+                    gt_path = self._resolve_bronze_file(
+                        category=cat,
+                        split=split,
+                        relpath=str(gt_rel),
+                        expected_sha256=rec.get("gt_sha256"),
+                        archive_relpath=arch_rel,
+                        include_gt=True,
+                        lease_stack=lease_stack,
                     )
+                    gt_buf = np.fromfile(str(gt_path), dtype=np.uint8)
+                    gt_mask = cv2.imdecode(gt_buf, cv2.IMREAD_UNCHANGED)
+                    if gt_mask is None:
+                        raise CorruptedCacheError(f"Failed to decode GT mask at {gt_path}")
+                    if gt_mask.shape[:2] != rgb.shape[:2]:
+                        raise DataContractViolationError(
+                            f"GT mask spatial mismatch: {gt_mask.shape[:2]} != RGB {rgb.shape[:2]}"
+                        )
 
         return MultimodalSample(
             sample_key=str(rec["sample_key"]),

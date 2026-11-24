@@ -60,9 +60,11 @@ All remote storage operations are strictly confined to a single dedicated folder
 ### Quick Start
 
 ```powershell
-# 1. Create virtual environment and install VISTA
+# 1. Create virtual environment and install VISTA with reproducible constraints
 py -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
+.\.venv\Scripts\python.exe -m pip install -e ".[dev]" -c constraints/base.txt
+# Optional CPU-only PyTorch for ML DataLoader verification:
+# .\.venv\Scripts\python.exe -m pip install --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple -c constraints/ml-cpu.txt torch
 
 # 2. Configure local environment files (never commit configs/storage.env or .env)
 Copy-Item configs\storage.env.example configs\storage.env
@@ -88,13 +90,17 @@ docker compose up -d postgres
 # 8. Manually verify remote Bronze/Silver/Gold and reclaim local cache for an ingested category
 .\.venv\Scripts\python.exe -m vista cleanup-cache cable_gland --dry-run
 
-# 8. Run offline CI suite (lint + hygiene + unit/integration/dbt tests)
+# 9. Run mandatory CI tiers locally (lint, hygiene, core, postgres, s3_compat, ml_loader — 0 skips)
 .\.venv\Scripts\ruff.exe check src tests scripts
 .\.venv\Scripts\python.exe scripts/check_repo_hygiene.py
-.\.venv\Scripts\python.exe -m pytest -m "not live" -v
+.\.venv\Scripts\python.exe -m pytest -m "not live and not postgres and not s3_compat and not ml_loader and not mlflow_server" -v
+$env:VISTA_REQUIRE_POSTGRES="1"; .\.venv\Scripts\python.exe -m pytest -m postgres -v
+$env:VISTA_REQUIRE_S3_RCLONE="1"; .\.venv\Scripts\python.exe -m pytest -m s3_compat -v
+$env:VISTA_REQUIRE_TORCH="1"; .\.venv\Scripts\python.exe -m pytest -m ml_loader -v
 
-# 9. Run live Google Drive workspace test (requires local rclone gdrive: auth)
+# 10. Optional live Google Drive & Docker MLflow server integration tests
 .\.venv\Scripts\python.exe -m pytest -m live -v
+# docker compose --profile mlflow up -d; $env:VISTA_REQUIRE_MLFLOW_SERVER="1"; .\.venv\Scripts\python.exe -m pytest -m mlflow_server -v
 ```
 
 ---
@@ -107,6 +113,9 @@ VISTA/
 │   ├── vista.yaml                # Official MVTec 3D-AD catalog, validation & preprocessing configs
 │   ├── storage.env.example       # Drive / S3 storage config template
 │   └── .env.example              # PostgreSQL & MLflow env template
+├── constraints/
+│   ├── base.txt                  # Cross-platform reproducible DE + dev dependency constraints
+│   └── ml-cpu.txt                # Optional CPU-only PyTorch constraint
 ├── src/
 │   ├── storage.py                # Backward-compatible storage facade
 │   └── vista/
@@ -159,7 +168,7 @@ VISTA/
 - DuckDB + `dbt` analytical warehouse (`dim_*`, `fct_*`, `mart_*`, including `mart_material_type_comparison`), automated dbt tests, 16 analytical SQL queries, visual foreground segmentation diagnostic panels (`fg_diagnostics_<category>.png`), and reproducible EDA reports/figures.
 - Fail-closed local cache cleanup (`vista cleanup-cache` / `run-category --cleanup-cache`) that independently verifies remote Bronze archives (size + MD5/SHA-256), Silver split shard completeness and checksum integrity, and the category's committed Gold snapshot before reclaiming local disk space; `VistaMultimodalDataset` deterministically recovers RGB, depth, normals, validity masks, and test evaluation masks on demand (or via bounded category hydration) directly from durable Bronze archives and Silver `.tar` shards with SHA-256 and archive-security verification.
 - **Engineering Documentation:** See [docs/engineering/technology-audit.md](docs/engineering/technology-audit.md), [docs/engineering/data-ownership.md](docs/engineering/data-ownership.md), [docs/engineering/data-contracts.md](docs/engineering/data-contracts.md), [docs/engineering/failure-recovery.md](docs/engineering/failure-recovery.md), [docs/engineering/runtime-configuration.md](docs/engineering/runtime-configuration.md), [docs/engineering/verification-matrix.md](docs/engineering/verification-matrix.md), [docs/engineering/limitations.md](docs/engineering/limitations.md), and [analytics/reports/storage_performance.md](analytics/reports/storage_performance.md).
-- GitHub Actions CI (Ruff lint, secret/artifact hygiene, 61 unit + offline integration + S3-compatible + PyTorch multi-worker + live PostgreSQL + dbt fixture tests without private credentials; plus 2 `@pytest.mark.live` Google Drive workspace & recovery tests).
+- GitHub Actions CI with **4 mandatory, zero-skip jobs** (`core`, `postgres` 16 container, `storage-s3-compat` with `rclone`, `ml-loader` with CPU PyTorch `DataLoader(num_workers=0, 2, 4)` + `persistent_workers=True`), installed from reproducible `constraints/` files (`68` CI-enforced tests across the 4 jobs + `1` `@pytest.mark.mlflow_server` live Docker MLflow test + `2` `@pytest.mark.live` Google Drive workspace & recovery tests = `71` total tests).
 - **Verified Real-Dataset Coverage (3 of 10 MVTec 3D-AD Categories, `1,169` Total Samples):**
   - `cable_gland` (manufactured): `354` samples (`223` train, `23` val, `108` test; `253` PASS, `101` WARN near-dups, `0` FAIL/QUARANTINE; FG 3D missing `1.61%` vs BG `44.68%`; mean `fg_rgb_3d_iou = 0.843`, min `0.715`).
   - `cookie` (organic): `363` samples (`210` train, `22` val, `131` test; `248` PASS, `115` WARN near-dups, `0` FAIL/QUARANTINE; FG 3D missing `0.09%` vs BG `14.43%`; mean `fg_rgb_3d_iou = 0.907`, min `0.862`).

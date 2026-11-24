@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import tarfile
 from concurrent.futures import ProcessPoolExecutor
@@ -153,25 +154,28 @@ def _torch_collate_identity(batch):
     return batch
 
 
-def test_multiprocess_and_pytorch_dataloader_concurrent_cold_recovery(tmp_path: Path) -> None:
-    archive = _create_mini_archive(tmp_path, category="cookie", n_train=8)
-    cfg, storage = _build_cfg(tmp_path, category="cookie", mlflow_mode="disabled")
+def _setup_published_mini_snapshot(tmp_path: Path, *, category: str = "cookie", n_train: int = 8):
+    archive = _create_mini_archive(tmp_path, category=category, n_train=n_train)
+    cfg, storage = _build_cfg(tmp_path, category=category, mlflow_mode="disabled")
     engine = create_db_engine(cfg.database)
     init_db(engine)
     db = DatabaseSessionManager(engine)
 
     with db.session() as sess:
-        MetadataRepository(sess).start_pipeline_run("mp-test", "cookie", "1.0.0", "silver_v1", run_id="mp-1")
-    ing = ingest_category_to_bronze(cfg=cfg, storage=storage, db=db, category="cookie", run_id="mp-1", local_archive_override=archive)
-    validate_category(cfg=cfg, storage=storage, db=db, category="cookie", category_root=ing.extracted_dir, run_id="mp-1")
-    transform_category_to_silver(cfg=cfg, storage=storage, db=db, category="cookie", category_root=ing.extracted_dir, run_id="mp-1")
-    extract_category_quality(cfg=cfg, db=db, category="cookie", category_root=ing.extracted_dir, run_id="mp-1")
+        MetadataRepository(sess).start_pipeline_run("mp-test", category, "1.0.0", "silver_v1", run_id="mp-1")
+    ing = ingest_category_to_bronze(cfg=cfg, storage=storage, db=db, category=category, run_id="mp-1", local_archive_override=archive)
+    validate_category(cfg=cfg, storage=storage, db=db, category=category, category_root=ing.extracted_dir, run_id="mp-1")
+    transform_category_to_silver(cfg=cfg, storage=storage, db=db, category=category, category_root=ing.extracted_dir, run_id="mp-1")
+    extract_category_quality(cfg=cfg, db=db, category=category, category_root=ing.extracted_dir, run_id="mp-1")
     snap = publish_gold_datasets(cfg=cfg, storage=storage, db=db, run_id="mp-1")
+    cleanup_verified_category_cache(cfg=cfg, storage=storage, db=db, category=category)
+    return cfg, storage, snap
 
-    # Complete cache cleanup first
-    cleanup_verified_category_cache(cfg=cfg, storage=storage, db=db, category="cookie")
 
-    # 1. ProcessPoolExecutor(max_workers=4) hitting COLD shared cache simultaneously
+def test_multiprocess_processpool_concurrent_cold_recovery(tmp_path: Path) -> None:
+    _cfg, storage, snap = _setup_published_mini_snapshot(tmp_path, category="cookie", n_train=8)
+
+    # ProcessPoolExecutor(max_workers=4) hitting COLD shared cache simultaneously
     cold_root = tmp_path / "cold_mp"
     tasks = [
         (
@@ -192,13 +196,23 @@ def test_multiprocess_and_pytorch_dataloader_concurrent_cold_recovery(tmp_path: 
     assert all(r[2] == (32, 32, 3) for r in mp_results)
     # No lingering .part files left behind after concurrent workers finish
     assert list(cold_root.rglob("*.part")) == []
+    # Committed snapshot remains untouched & read-only
+    assert verify_snapshot_directory(snap.local_snapshot_dir).manifest_sha256 == snap.manifest_sha256
 
-    # 2. If PyTorch is installed, verify real torch.utils.data.DataLoader with num_workers=0, 2, 4
-    pytest.importorskip("torch")
-    from torch.utils.data import DataLoader
 
-    expected_keys = [r[0] for r in mp_results]
-    expected_digests = [r[1] for r in mp_results]
+@pytest.mark.ml_loader
+def test_pytorch_dataloader_workers_0_2_4_and_persistent_workers(tmp_path: Path) -> None:
+    try:
+        from torch.utils.data import DataLoader
+    except ImportError as exc:
+        if os.environ.get("VISTA_REQUIRE_TORCH") == "1":
+            pytest.fail(f"PyTorch is required (VISTA_REQUIRE_TORCH=1) but failed to import: {exc}")
+        pytest.skip("PyTorch optional extra `.[ml]` not installed; set VISTA_REQUIRE_TORCH=1 to enforce")
+
+    _cfg, storage, snap = _setup_published_mini_snapshot(tmp_path, category="cookie", n_train=8)
+
+    baseline_keys: list[str] | None = None
+    baseline_digests: list[str] | None = None
 
     for n_workers in (0, 2, 4):
         worker_root = tmp_path / f"torch_cold_w{n_workers}"
@@ -210,21 +224,39 @@ def test_multiprocess_and_pytorch_dataloader_concurrent_cold_recovery(tmp_path: 
             partition="train",
             storage_backend=storage,
             hydrate_mode="on_demand",
+            max_cache_gb=1.0,
         )
-        loader = DataLoader(ds, batch_size=2, shuffle=False, num_workers=n_workers, collate_fn=_torch_collate_identity)
-        got_keys: list[str] = []
-        got_digests: list[str] = []
-        for batch in loader:
-            for s in batch:
-                got_keys.append(s.sample_key)
-                got_digests.append(
-                    hashlib.sha256(
-                        s.rgb.tobytes() + np.nan_to_num(s.depth, nan=-999.0).tobytes() + s.valid_mask.tobytes()
-                    ).hexdigest()
-                )
-        assert got_keys == expected_keys
-        assert got_digests == expected_digests
+        loader = DataLoader(
+            ds,
+            batch_size=2,
+            shuffle=False,
+            num_workers=n_workers,
+            persistent_workers=(n_workers > 0),
+            collate_fn=_torch_collate_identity,
+        )
+        for _epoch in range(2):
+            got_keys: list[str] = []
+            got_digests: list[str] = []
+            for batch in loader:
+                for s in batch:
+                    got_keys.append(s.sample_key)
+                    got_digests.append(
+                        hashlib.sha256(
+                            s.rgb.tobytes()
+                            + np.nan_to_num(s.depth, nan=-999.0).tobytes()
+                            + s.valid_mask.tobytes()
+                        ).hexdigest()
+                    )
+            if baseline_keys is None:
+                baseline_keys = got_keys
+                baseline_digests = got_digests
+                assert len(baseline_keys) == 8
+                assert baseline_keys == sorted(baseline_keys)
+            else:
+                assert got_keys == baseline_keys
+                assert got_digests == baseline_digests
         assert list(worker_root.rglob("*.part")) == []
+        assert ds.budget_manager is not None and ds.budget_manager.active_reserved_bytes() == 0
         # Committed snapshot remains untouched & read-only
         assert verify_snapshot_directory(snap.local_snapshot_dir).manifest_sha256 == snap.manifest_sha256
 
@@ -367,8 +399,8 @@ def test_contracts_v1_legacy_snapshot_read_and_recovery_compatibility(tmp_path: 
     assert sample.depth.shape == (32, 32)
 
 
-def test_state_transitions_and_live_postgresql_clean_and_migration(tmp_path: Path) -> None:
-    # Part A: State transition enforcement (always runs, SQLite + Postgres)
+def test_repository_state_transition_guards(tmp_path: Path) -> None:
+    """Verify state transition guards on PipelineRun, StageRun, and GoldSnapshot (always runs in core CI)."""
     db_file = tmp_path / "trans.sqlite"
     engine = create_db_engine(DatabaseConfig(url_override=f"sqlite:///{db_file.as_posix()}"))
     init_db(engine)
@@ -405,7 +437,10 @@ def test_state_transitions_and_live_postgresql_clean_and_migration(tmp_path: Pat
                 telemetry_cutoff_utc=run.started_at,
             )
 
-    # Part B: Real PostgreSQL clean install + legacy migration/backfill + idempotency (when local PG is up)
+
+@pytest.mark.postgres
+def test_postgresql_clean_install_migration_and_idempotency(tmp_path: Path) -> None:
+    """Real PostgreSQL clean install, state-transition enforcement, legacy migration, and idempotency."""
     pg_cfg = DatabaseConfig.load()
     admin_url = f"postgresql+psycopg://{pg_cfg.user}:{pg_cfg.password}@{pg_cfg.host}:{pg_cfg.port}/postgres"
     admin_engine = create_db_engine(DatabaseConfig(url_override=admin_url))
@@ -414,8 +449,13 @@ def test_state_transitions_and_live_postgresql_clean_and_migration(tmp_path: Pat
         with admin_engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
             conn.execute(text(f'DROP DATABASE IF EXISTS "{test_db_name}"'))
             conn.execute(text(f'CREATE DATABASE "{test_db_name}"'))
-    except Exception:
-        pytest.skip("Local PostgreSQL server not reachable; skipping real-Postgres migration test")
+    except Exception as exc:
+        if os.environ.get("VISTA_REQUIRE_POSTGRES") == "1":
+            pytest.fail(
+                f"PostgreSQL is required (VISTA_REQUIRE_POSTGRES=1) at {pg_cfg.host}:{pg_cfg.port} "
+                f"but connection failed: {exc}"
+            )
+        pytest.skip(f"Local PostgreSQL server not reachable at {pg_cfg.host}:{pg_cfg.port}: {exc}")
 
     test_pg_url = f"postgresql+psycopg://{pg_cfg.user}:{pg_cfg.password}@{pg_cfg.host}:{pg_cfg.port}/{test_db_name}"
     pg_engine = create_db_engine(DatabaseConfig(url_override=test_pg_url))
@@ -429,6 +469,12 @@ def test_state_transitions_and_live_postgresql_clean_and_migration(tmp_path: Pat
         res2 = run_category_pipeline("cookie", cfg=cfg, storage=storage, db=pg_db, local_archive_override=archive, run_analytics=False)
         assert res1["publish_gold"]["snapshot_id"] == res2["publish_gold"]["snapshot_id"]
         assert res2["publish_gold"]["reused_existing"] is True
+
+        # Verify PostgreSQL rejects illegal terminal state transitions too
+        with pg_db.session() as sess:
+            repo = MetadataRepository(sess)
+            with pytest.raises(InvalidStateTransitionError):
+                repo.finish_pipeline_run(res1["run_id"], "FAILED")
 
         # Simulate legacy rows (NULL shard_relpath + non-# depth_remote_uri) and verify init_db migrates with zero row loss
         with pg_engine.begin() as conn:
