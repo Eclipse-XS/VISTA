@@ -90,3 +90,4 @@ quality:
 
 cache:
   max_local_cache_gb: 6.0
+  min_free_disk_gb: 2.0

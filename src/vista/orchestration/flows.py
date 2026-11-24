@@ -1,11 +1,26 @@
 """Prefect-orchestrated dependent Data Engineering workflows for VISTA.
 
+Supported Execution Model (Model A):
+    Local ephemeral Prefect 3 execution with PostgreSQL (`vista-postgres`) as the
+    authoritative persistent operational state store. No permanent Prefect server
+    daemon is required.
+
 Pipeline DAG:
-    discover -> ingest -> validate -> transform -> quality_metrics -> publish_gold -> analytics
+    discover -> ingest -> validate -> transform -> quality_metrics
+             -> publish_gold -> mlflow_log -> analytics -> (optional cleanup_cache)
+
+Key failure & observability guarantees:
+- Every stage is recorded in PostgreSQL `stage_runs` with attempt_number, is_retry,
+  duration, items_processed, items_failed, and structured observability logs.
+- `publish_gold` commits the immutable Gold snapshot independently from `mlflow_log`
+  and `analytics`, so an MLflow or analytics failure NEVER leaves an ambiguous Gold
+  snapshot status, and a failed `analytics` step still marks the overall pipeline
+  run `FAILED` (never falsely `SUCCEEDED`).
 """
 
 from __future__ import annotations
 
+import time
 import uuid
 from dataclasses import asdict
 from pathlib import Path
@@ -16,6 +31,7 @@ from prefect.cache_policies import NO_CACHE
 
 from vista.analytics.duckdb_runner import execute_analytical_sql_suite, run_dbt_build
 from vista.analytics.gold_publisher import (
+    GoldSnapshotPublishResult,
     export_operational_telemetry,
     publish_gold_datasets,
 )
@@ -31,7 +47,9 @@ from vista.metadata.repository import MetadataRepository
 from vista.preprocessing.processor import transform_category_to_silver
 from vista.quality.extractor import extract_category_quality
 from vista.storage import (
+    LocalCacheBudgetManager,
     StorageBackend,
+    StorageError,
     build_storage_backend,
     cleanup_verified_category_cache,
 )
@@ -40,19 +58,39 @@ from vista.validation.validator import validate_category
 log = get_logger(__name__)
 
 
+def _classify_failure_category(exc: Exception) -> str:
+    if isinstance(exc, StorageError):
+        return exc.category.value
+    return type(exc).__name__
+
+
+def _current_cache_bytes(cfg: VistaConfig) -> int:
+    mgr = LocalCacheBudgetManager(
+        state_dir=cfg.storage.local_cache_dir,
+        managed_roots=(cfg.storage.local_cache_dir, cfg.local_bronze_dir, cfg.local_silver_dir),
+        max_cache_bytes=int(cfg.max_local_cache_gb * (1024**3)),
+        min_free_disk_bytes=int(cfg.min_free_disk_gb * (1024**3)),
+    )
+    return mgr.current_cache_bytes()
+
+
 def _execute_stage(
+    cfg: VistaConfig,
     db: DatabaseSessionManager,
     run_id: str,
     stage_name: str,
     category: str | None,
     fn,
 ) -> Any:
+    t0 = time.perf_counter()
     with db.session() as sess:
         stage = MetadataRepository(sess).start_stage_run(run_id, stage_name, category)
         stage_id = stage.stage_run_id
+        attempt_number = stage.attempt_number
 
     try:
         result, items_ok, items_failed, checkpoint = fn(stage_id)
+        dur = round(time.perf_counter() - t0, 4)
         with db.session() as sess:
             MetadataRepository(sess).finish_stage_run(
                 stage_id,
@@ -61,19 +99,62 @@ def _execute_stage(
                 items_failed=items_failed,
                 checkpoint=checkpoint,
             )
+        bytes_transferred = 0
+        snapshot_id = None
+        dq_summary = None
+        if isinstance(checkpoint, dict):
+            bytes_transferred = int(checkpoint.get("bytes_transferred", 0) or 0)
+            snapshot_id = checkpoint.get("snapshot_id")
+            if "passed" in checkpoint and "failed" in checkpoint:
+                dq_summary = {
+                    "passed": checkpoint.get("passed"),
+                    "warned": checkpoint.get("warned"),
+                    "quarantined": checkpoint.get("quarantined"),
+                    "failed": checkpoint.get("failed"),
+                }
+        log.info(
+            "stage_completed",
+            run_id=run_id,
+            stage_name=stage_name,
+            category=category,
+            attempt_number=attempt_number,
+            retry_count=max(0, attempt_number - 1),
+            duration_seconds=dur,
+            items_processed=items_ok,
+            items_failed=items_failed,
+            bytes_transferred=bytes_transferred,
+            cache_bytes_used=_current_cache_bytes(cfg),
+            snapshot_id=snapshot_id,
+            data_quality_summary=dq_summary,
+            failure_category=None,
+        )
         return result
     except Exception as exc:
+        dur = round(time.perf_counter() - t0, 4)
+        fail_cat = _classify_failure_category(exc)
         with db.session() as sess:
             MetadataRepository(sess).finish_stage_run(
                 stage_id,
                 "FAILED",
                 items_failed=1,
-                error_message=str(exc),
+                error_message=f"[{fail_cat}] {exc}",
             )
+        log.error(
+            "stage_failed",
+            run_id=run_id,
+            stage_name=stage_name,
+            category=category,
+            attempt_number=attempt_number,
+            retry_count=max(0, attempt_number - 1),
+            duration_seconds=dur,
+            failure_category=fail_cat,
+            cache_bytes_used=_current_cache_bytes(cfg),
+            error=str(exc),
+        )
         raise
 
 
-@task(name="vista-discover", retries=2, retry_delay_seconds=[5, 15], cache_policy=NO_CACHE)
+@task(name="vista-discover", retries=2, retry_delay_seconds=[5, 15], timeout_seconds=120, cache_policy=NO_CACHE)
 def discover_task(
     cfg: VistaConfig,
     storage: StorageBackend,
@@ -107,10 +188,10 @@ def discover_task(
         }
         return info, 1, 0, info
 
-    return _execute_stage(db, run_id, "discover", category, _run)
+    return _execute_stage(cfg, db, run_id, "discover", category, _run)
 
 
-@task(name="vista-ingest-bronze", retries=2, retry_delay_seconds=[10, 30], cache_policy=NO_CACHE)
+@task(name="vista-ingest-bronze", retries=2, retry_delay_seconds=[10, 30], timeout_seconds=3600, cache_policy=NO_CACHE)
 def ingest_task(
     cfg: VistaConfig,
     storage: StorageBackend,
@@ -135,12 +216,13 @@ def ingest_task(
         return d, summary.samples_discovered, 0, {
             "archive_sha256": summary.archive_sha256,
             "samples_discovered": summary.samples_discovered,
+            "bytes_transferred": summary.archive_size_bytes,
         }
 
-    return _execute_stage(db, run_id, "ingest", category, _run)
+    return _execute_stage(cfg, db, run_id, "ingest", category, _run)
 
 
-@task(name="vista-validate-multimodal", retries=1, retry_delay_seconds=5, cache_policy=NO_CACHE)
+@task(name="vista-validate-multimodal", retries=1, retry_delay_seconds=5, timeout_seconds=1800, cache_policy=NO_CACHE)
 def validate_task(
     cfg: VistaConfig,
     storage: StorageBackend,
@@ -161,10 +243,10 @@ def validate_task(
         d = asdict(summary)
         return d, summary.total_samples, summary.failed + summary.quarantined, d
 
-    return _execute_stage(db, run_id, "validate", category, _run)
+    return _execute_stage(cfg, db, run_id, "validate", category, _run)
 
 
-@task(name="vista-transform-silver", retries=1, retry_delay_seconds=10, cache_policy=NO_CACHE)
+@task(name="vista-transform-silver", retries=1, retry_delay_seconds=10, timeout_seconds=3600, cache_policy=NO_CACHE)
 def transform_task(
     cfg: VistaConfig,
     storage: StorageBackend,
@@ -188,10 +270,10 @@ def transform_task(
         processed = summary.samples_transformed + summary.samples_resumed_skipped
         return d, processed, summary.samples_excluded_quarantine, d
 
-    return _execute_stage(db, run_id, "transform", category, _run)
+    return _execute_stage(cfg, db, run_id, "transform", category, _run)
 
 
-@task(name="vista-quality-metrics", retries=1, retry_delay_seconds=5, cache_policy=NO_CACHE)
+@task(name="vista-quality-metrics", retries=1, retry_delay_seconds=5, timeout_seconds=1800, cache_policy=NO_CACHE)
 def quality_metrics_task(
     cfg: VistaConfig,
     db: DatabaseSessionManager,
@@ -210,10 +292,10 @@ def quality_metrics_task(
         d = asdict(summary)
         return d, summary.samples_scored, summary.samples_skipped, d
 
-    return _execute_stage(db, run_id, "quality_metrics", category, _run)
+    return _execute_stage(cfg, db, run_id, "quality_metrics", category, _run)
 
 
-@task(name="vista-publish-gold", retries=2, retry_delay_seconds=[5, 15], cache_policy=NO_CACHE)
+@task(name="vista-publish-gold", retries=2, retry_delay_seconds=[5, 15], timeout_seconds=900, cache_policy=NO_CACHE)
 def publish_gold_task(
     cfg: VistaConfig,
     storage: StorageBackend,
@@ -221,7 +303,7 @@ def publish_gold_task(
     category: str,
     run_id: str,
     upload_to_remote: bool = True,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], GoldSnapshotPublishResult]:
     def _run(stage_id: int):
         snapshot = publish_gold_datasets(
             cfg=cfg,
@@ -231,12 +313,7 @@ def publish_gold_task(
             upload_to_remote=upload_to_remote,
             exclude_in_flight_stage_run_id=stage_id,
         )
-        mlflow_run_id = log_gold_snapshot_to_mlflow(
-            cfg=cfg,
-            run_id=run_id,
-            category=category,
-            snapshot=snapshot,
-        )
+        total_bytes = sum(t.size_bytes for t in snapshot.tables)
         summary = {
             "snapshot_id": snapshot.snapshot_id,
             "status": snapshot.status,
@@ -246,14 +323,41 @@ def publish_gold_task(
             "local_snapshot_dir": str(snapshot.local_snapshot_dir),
             "train_manifest_hashes": snapshot.train_manifest_hashes,
             "tables": {e.table_name: e.row_count for e in snapshot.tables},
-            "mlflow_run_id": mlflow_run_id,
+            "bytes_transferred": total_bytes,
         }
-        return summary, len(snapshot.tables), 0, summary
+        return (summary, snapshot), len(snapshot.tables), 0, summary
 
-    return _execute_stage(db, run_id, "publish_gold", category, _run)
+    return _execute_stage(cfg, db, run_id, "publish_gold", category, _run)
 
 
-@task(name="vista-analytics-dbt-eda", retries=1, retry_delay_seconds=5, cache_policy=NO_CACHE)
+@task(name="vista-mlflow-log", retries=0, timeout_seconds=60, cache_policy=NO_CACHE)
+def mlflow_log_task(
+    cfg: VistaConfig,
+    db: DatabaseSessionManager,
+    category: str,
+    run_id: str,
+    snapshot: GoldSnapshotPublishResult,
+) -> dict[str, Any]:
+    def _run(_stage_id: int):
+        mlflow_run_id = log_gold_snapshot_to_mlflow(
+            cfg=cfg,
+            run_id=run_id,
+            category=category,
+            snapshot=snapshot,
+        )
+        summary = {
+            "snapshot_id": snapshot.snapshot_id,
+            "mlflow_mode": cfg.mlflow_mode,
+            "mlflow_failure_policy": cfg.mlflow_failure_policy,
+            "mlflow_run_id": mlflow_run_id,
+            "logged": mlflow_run_id is not None,
+        }
+        return summary, (1 if mlflow_run_id else 0), 0, summary
+
+    return _execute_stage(cfg, db, run_id, "mlflow_log", category, _run)
+
+
+@task(name="vista-analytics-dbt-eda", retries=1, retry_delay_seconds=5, timeout_seconds=900, cache_policy=NO_CACHE)
 def analytics_task(
     cfg: VistaConfig,
     db: DatabaseSessionManager,
@@ -263,7 +367,6 @@ def analytics_task(
     category_root: str | None = None,
 ) -> dict[str, Any]:
     def _run(_stage_id: int):
-        # Generate visual foreground segmentation diagnostics while local Bronze files are present
         vis_res = None
         if category_root and Path(category_root).is_dir():
             vis_res = generate_foreground_visual_diagnostics(
@@ -272,7 +375,6 @@ def analytics_task(
                 category=category,
                 category_root=Path(category_root),
             )
-        # Export authoritative post-publish operational telemetry (now includes SUCCEEDED publish_gold!)
         tel = export_operational_telemetry(cfg=cfg, db=db)
         snap_path = Path(snapshot_dir) if snapshot_dir else None
         dbt_res = run_dbt_build(
@@ -300,7 +402,7 @@ def analytics_task(
         }
         return summary, len(sql_res), 0, summary
 
-    return _execute_stage(db, run_id, "analytics", category, _run)
+    return _execute_stage(cfg, db, run_id, "analytics", category, _run)
 
 
 @flow(name="vista-category-pipeline", log_prints=False)
@@ -335,6 +437,7 @@ def run_category_pipeline(
                 "preprocessing": cfg.preprocessing.canonical_dict(),
                 "config_hash": cfg.preprocessing.config_hash,
                 "upload_to_remote": upload_to_remote,
+                "mlflow_mode": cfg.mlflow_mode,
             },
             run_id=run_id,
         )
@@ -358,9 +461,12 @@ def run_category_pipeline(
             cfg, storage, db, category, cat_root, run_id, upload_to_remote=upload_to_remote
         )
         qm = quality_metrics_task(cfg, db, category, cat_root, run_id)
-        gold = publish_gold_task(
+        gold, snapshot_obj = publish_gold_task(
             cfg, storage, db, category, run_id, upload_to_remote=upload_to_remote
         )
+        mlflow_res = mlflow_log_task(cfg, db, category, run_id, snapshot_obj)
+        gold["mlflow_run_id"] = mlflow_res.get("mlflow_run_id")
+
         ana = (
             analytics_task(
                 cfg,
@@ -397,10 +503,15 @@ def run_category_pipeline(
             "transform": tr,
             "quality_metrics": qm,
             "publish_gold": gold,
+            "mlflow_log": mlflow_res,
             "analytics": ana,
             "cache_cleanup": cleanup_res,
         }
     except Exception as exc:
         with db.session() as sess:
-            MetadataRepository(sess).finish_pipeline_run(run_id, "FAILED", error_message=str(exc))
+            MetadataRepository(sess).finish_pipeline_run(
+                run_id,
+                "FAILED",
+                error_message=f"[{_classify_failure_category(exc)}] {exc}",
+            )
         raise

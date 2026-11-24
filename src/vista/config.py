@@ -204,8 +204,11 @@ class VistaConfig:
     quality: QualityConfig
     categories: dict[str, CategorySpec]
     max_local_cache_gb: float = 6.0
-    mlflow_tracking_uri: str = "file:./mlruns"
+    min_free_disk_gb: float = 2.0
+    mlflow_mode: str = "local"
+    mlflow_tracking_uri: str = "sqlite:///mlruns/mlflow.db"
     mlflow_experiment: str = "vista-data-engineering"
+    mlflow_failure_policy: str = "warn"
 
     @property
     def local_bronze_dir(self) -> Path:
@@ -256,16 +259,41 @@ class VistaConfig:
 
         dotenv_vals = load_env_file(dotenv_path or DEFAULT_DOTENV)
         default_mlflow_db = (PROJECT_ROOT / "mlruns" / "mlflow.db").as_posix()
-        mlflow_uri = (
+        mlflow_mode = (
+            os.environ.get("VISTA_MLFLOW_MODE")
+            or dotenv_vals.get("VISTA_MLFLOW_MODE")
+            or "local"
+        ).strip().lower()
+        if mlflow_mode not in ("local", "server", "disabled"):
+            raise ValueError(
+                f"Invalid VISTA_MLFLOW_MODE={mlflow_mode!r}; expected 'local', 'server', or 'disabled'"
+            )
+        explicit_uri = (
             os.environ.get("VISTA_MLFLOW_TRACKING_URI")
             or dotenv_vals.get("VISTA_MLFLOW_TRACKING_URI")
-            or f"sqlite:///{default_mlflow_db}"
-        )
+            or ""
+        ).strip()
+        if explicit_uri:
+            mlflow_uri = explicit_uri
+        elif mlflow_mode == "server":
+            mlflow_port = os.environ.get("VISTA_MLFLOW_PORT") or dotenv_vals.get("VISTA_MLFLOW_PORT") or "5050"
+            mlflow_uri = f"http://127.0.0.1:{mlflow_port}"
+        else:
+            mlflow_uri = f"sqlite:///{default_mlflow_db}"
         mlflow_exp = (
             os.environ.get("VISTA_MLFLOW_EXPERIMENT")
             or dotenv_vals.get("VISTA_MLFLOW_EXPERIMENT")
             or "vista-data-engineering"
         )
+        mlflow_failure_policy = (
+            os.environ.get("VISTA_MLFLOW_FAILURE_POLICY")
+            or dotenv_vals.get("VISTA_MLFLOW_FAILURE_POLICY")
+            or "warn"
+        ).strip().lower()
+        if mlflow_failure_policy not in ("warn", "strict"):
+            raise ValueError(
+                f"Invalid VISTA_MLFLOW_FAILURE_POLICY={mlflow_failure_policy!r}; expected 'warn' or 'strict'"
+            )
 
         return cls(
             project_root=PROJECT_ROOT,
@@ -282,6 +310,9 @@ class VistaConfig:
             quality=QualityConfig(**qual_raw) if qual_raw else QualityConfig(),
             categories=categories,
             max_local_cache_gb=float(cache_raw.get("max_local_cache_gb", 6.0)),
+            min_free_disk_gb=float(cache_raw.get("min_free_disk_gb", 2.0)),
+            mlflow_mode=mlflow_mode,
             mlflow_tracking_uri=mlflow_uri,
             mlflow_experiment=mlflow_exp,
+            mlflow_failure_policy=mlflow_failure_policy,
         )

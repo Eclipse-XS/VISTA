@@ -1,9 +1,9 @@
 # VISTA — Exploratory Data Analysis Report (MVTec 3D-AD)
 
-- **Generated (UTC):** `2026-11-21T10:13:55.149311+00:00`
+- **Generated (UTC):** `2026-11-24T20:33:57.095491+00:00`
 - **Immutable Gold Snapshot ID:** `snap_1_0_0_silver_v1_172131d3_a3cd04efd735`
 - **Snapshot Manifest SHA-256:** `1c50ca3d4956c6fc1c024d4a9ea7126c14364687c909fedc155d2fc5061b2440`
-- **Telemetry Cutoff (UTC):** `2026-11-21T10:13:05.496583+00:00`
+- **Telemetry Cutoff (UTC):** `2026-11-24T20:33:13.666710+00:00`
 - **Dataset:** `mvtec_3d_ad` version `1.0.0` (`CC BY-NC-SA 4.0 (Non-Commercial Academic/Research Use Only)`)
 - **Preprocessing Version:** `silver_v1` (config hash `172131d30e11d64f`)
 - **Ingested Categories Covered (3 of 10):** `cable_gland, cookie, dowel`
@@ -507,7 +507,7 @@ Source SQL: `analytics/sql/10_version_quality_comparison.sql`
 
 ## Limitations
 
-1. `3` of 10 official MVTec 3D-AD categories (`cable_gland, cookie, dowel`) have been ingested so far. Do not extrapolate category-specific distributions, correlations, or segmentation reliability beyond the ingested categories.
-2. `fg_rgb` (border-referenced Otsu + morphology) is an unsupervised appearance proxy, not a ground-truth semantic segmentation mask; low-contrast or textured/organic objects and shadows can cause RGB-vs-3D disagreement as exposed in the failure cases above.
-3. `fg_3d` assumes the support surface occupies valid border pixels and lies approximately on a single plane; thin objects, recessed features, or non-planar fixtures can reduce `fg_3d` coverage or `fg_plane_inlier_ratio`.
-4. Observational rank correlations and distribution-shift tests identify statistical confounding and shortcut risks, not physical root causes.
+1. **Sample & Category Coverage (`Observation`):** `3` of 10 official MVTec 3D-AD categories (`cable_gland, cookie, dowel`) have been ingested (`1` organic category vs `2` manufactured categories). Do **not** generalize organic-vs-manufactured contrasts or category-specific correlations to un-ingested MVTec 3D-AD categories.
+2. **Pseudoreplication (`Statistical Caveat`):** Perceptual near-duplicates (`WARN` status across ~30% of samples) indicate correlated acquisitions of physically similar parts; naive sample-level p-values and bootstrap confidence intervals overstate effective independent sample size.
+3. **Unsupervised Foreground Proxy Boundaries (`Limitation`):** `fg_rgb` (border-referenced Otsu + morphology) and `fg_3d` (border plane residual `> 4 mm`) are heuristic proxies, not ground-truth segmentation masks. `fg_rgb_3d_iou` quantifies cross-proxy agreement, not segmentation accuracy. Dark internal textures (chocolate chips, shadowed flanges, recessed ribs) can be excluded by `fg_rgb`, and table crumbs/non-planar fixtures can trigger `fg_3d` false positives.
+4. **No Causal Proof (`Epistemic Boundary`):** Observational correlations and split-shift tests identify statistical confounding and shortcut risks (`Association` / `Hypothesis`), not proven physical root causes.

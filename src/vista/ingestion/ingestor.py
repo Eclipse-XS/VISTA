@@ -16,6 +16,7 @@ from vista.logging import get_logger
 from vista.metadata.database import DatabaseSessionManager
 from vista.metadata.repository import MetadataRepository
 from vista.storage.base import StorageBackend, md5_file, sha256_file
+from vista.storage.budget import LocalCacheBudgetManager
 from vista.storage.paths import bronze_archive_path, bronze_manifest_path
 
 log = get_logger(__name__)
@@ -160,6 +161,13 @@ def ingest_category_to_bronze(
     cache_archive_dir.mkdir(parents=True, exist_ok=True)
     extracted_base = cfg.local_bronze_dir / "mvtec_3d_ad" / category
 
+    budget_mgr = LocalCacheBudgetManager(
+        state_dir=cfg.storage.local_cache_dir,
+        managed_roots=(cfg.storage.local_cache_dir, cfg.local_bronze_dir, cfg.local_silver_dir),
+        max_cache_bytes=int(cfg.max_local_cache_gb * (1024**3)),
+        min_free_disk_bytes=int(cfg.min_free_disk_gb * (1024**3)),
+    )
+
     if local_archive_override is not None:
         archive_path = local_archive_override.resolve()
         if not archive_path.is_file():
@@ -175,6 +183,11 @@ def ingest_category_to_bronze(
                 f"status={probe.status_code}, error={probe.error}"
             )
         archive_dest = cache_archive_dir / spec.archive_filename
+        est_arch_bytes = probe.content_length or (spec.approx_size_mb * 1024 * 1024)
+        peak_req = LocalCacheBudgetManager.estimate_peak_temp_bytes(
+            est_arch_bytes, include_extraction=True, expansion_factor=2.2
+        )
+        budget_mgr.ensure_space(peak_req, protected_paths={archive_dest, extracted_base})
         dl = download_resumable(
             spec.url,
             archive_dest,

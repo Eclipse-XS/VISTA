@@ -18,7 +18,7 @@ services:
       retries: 10
 
   mlflow:
-    image: ghcr.io/mlflow/mlflow:v2.17.2
+    image: ghcr.io/mlflow/mlflow:${VISTA_MLFLOW_IMAGE_TAG:-v3.1.0}
     container_name: vista-mlflow
     profiles: ["mlflow"]
     restart: unless-stopped
@@ -34,8 +34,7 @@ services:
       --backend-store-uri sqlite:////mlflow/mlflow.db
       --default-artifact-root /mlflow/artifacts
     volumes:
-      - vista_mlflow_data:/mlflow
+      - ./mlruns:/mlflow
 
 volumes:
   vista_pg_data:
-  vista_mlflow_data:

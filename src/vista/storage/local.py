@@ -6,7 +6,13 @@ import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
-from vista.storage.base import RemoteObjectInfo, StorageBackend, md5_file
+from vista.storage.base import (
+    RemoteObjectInfo,
+    StorageBackend,
+    StorageNotFoundError,
+    atomic_temp_path,
+    md5_file,
+)
 from vista.storage.paths import validate_workspace_path
 
 
@@ -91,9 +97,13 @@ class LocalStorageBackend(StorageBackend):
         dest.parent.mkdir(parents=True, exist_ok=True)
         if dest.exists() and not overwrite:
             raise FileExistsError(f"Destination exists: {normalized_dest}")
-        tmp = dest.with_suffix(dest.suffix + ".part")
-        shutil.copy2(local_path, tmp)
-        tmp.replace(dest)
+        tmp = atomic_temp_path(dest)
+        try:
+            shutil.copy2(local_path, tmp)
+            tmp.replace(dest)
+        finally:
+            if tmp.exists():
+                tmp.unlink(missing_ok=True)
         info = self.stat(normalized_dest)
         assert info is not None
         return info
@@ -104,18 +114,32 @@ class LocalStorageBackend(StorageBackend):
         normalized = validate_workspace_path(subpath)
         src = self._resolve(normalized)
         if not src.is_file():
-            raise FileNotFoundError(f"Remote object not found: {normalized}")
+            raise StorageNotFoundError(
+                f"Remote object not found: {normalized}",
+                operation="download_file",
+                path=normalized,
+            )
         local_dest.parent.mkdir(parents=True, exist_ok=True)
         if skip_if_exists and local_dest.is_file() and local_dest.stat().st_size == src.stat().st_size:
             return local_dest
-        tmp = local_dest.with_suffix(local_dest.suffix + ".part")
-        shutil.copy2(src, tmp)
-        tmp.replace(local_dest)
+        tmp = atomic_temp_path(local_dest)
+        try:
+            shutil.copy2(src, tmp)
+            tmp.replace(local_dest)
+        finally:
+            if tmp.exists():
+                tmp.unlink(missing_ok=True)
         return local_dest
 
     def read_bytes(self, subpath: str, max_bytes: int | None = None) -> bytes:
         normalized = validate_workspace_path(subpath)
         src = self._resolve(normalized)
+        if not src.is_file():
+            raise StorageNotFoundError(
+                f"Remote object not found: {normalized}",
+                operation="read_bytes",
+                path=normalized,
+            )
         with src.open("rb") as f:
             return f.read() if max_bytes is None else f.read(max_bytes)
 

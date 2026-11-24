@@ -27,6 +27,7 @@ from vista.logging import get_logger
 from vista.metadata.database import DatabaseSessionManager
 from vista.metadata.models import BronzeArchive, FileManifest, GoldSnapshot, Sample, SilverArtifact
 from vista.storage.base import StorageBackend, md5_file, sha256_file
+from vista.storage.budget import LocalCacheBudgetManager
 from vista.storage.paths import bronze_archive_path, gold_snapshot_file_path
 
 log = get_logger(__name__)
@@ -318,11 +319,31 @@ def cleanup_verified_category_cache(
             )
 
     # All remote Bronze, Silver shard, and Gold snapshot artifacts verified -> safe to reclaim
+    # Guard: NEVER delete files actively leased by another worker process!
+    budget_mgr = LocalCacheBudgetManager(
+        state_dir=cfg.storage.local_cache_dir,
+        managed_roots=(cfg.storage.local_cache_dir, cfg.local_bronze_dir, cfg.local_silver_dir),
+        max_cache_bytes=int(cfg.max_local_cache_gb * (1024**3)),
+        min_free_disk_bytes=int(cfg.min_free_disk_gb * (1024**3)),
+    )
     candidates = [
         local_archive_path / arch.archive_filename,
         cfg.local_bronze_dir / "mvtec_3d_ad" / category,
         silver_local_root,
     ]
+    for target in candidates:
+        if not target.exists():
+            continue
+        if budget_mgr.is_leased(target):
+            raise CacheCleanupVerificationError(
+                f"Refusing to delete actively leased local cache path: {target}"
+            )
+        if target.is_dir():
+            for child in target.rglob("*"):
+                if child.is_file() and budget_mgr.is_leased(child):
+                    raise CacheCleanupVerificationError(
+                        f"Refusing to delete directory containing actively leased file: {child}"
+                    )
     reclaimed = 0
     removed: list[str] = []
     for target in candidates:

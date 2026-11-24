@@ -131,7 +131,8 @@ VISTA/
 ├── docs/
 │   ├── architecture.md           # System & Medallion architecture overview
 │   ├── quality_metrics.md        # Mathematical definitions & limitations of quality metrics
-│   └── storage_s3_migration.md   # Drive safeguards & AWS S3 migration guide
+│   ├── storage_s3_migration.md   # Drive safeguards & S3-compatible portability guide
+│   └── engineering/              # Full architecture audit, ownership, contracts, recovery & verification matrix
 ├── scripts/
 │   ├── storage.sh                # Workspace-confined rclone shell helper
 │   └── run_pipeline.py           # CLI launcher
@@ -157,7 +158,8 @@ VISTA/
 - Authoritative PostgreSQL operational telemetry with retry/attempt tracking, non-NULL duration aggregation, and consistency assertions.
 - DuckDB + `dbt` analytical warehouse (`dim_*`, `fct_*`, `mart_*`, including `mart_material_type_comparison`), automated dbt tests, 16 analytical SQL queries, visual foreground segmentation diagnostic panels (`fg_diagnostics_<category>.png`), and reproducible EDA reports/figures.
 - Fail-closed local cache cleanup (`vista cleanup-cache` / `run-category --cleanup-cache`) that independently verifies remote Bronze archives (size + MD5/SHA-256), Silver split shard completeness and checksum integrity, and the category's committed Gold snapshot before reclaiming local disk space; `VistaMultimodalDataset` deterministically recovers RGB, depth, normals, validity masks, and test evaluation masks on demand (or via bounded category hydration) directly from durable Bronze archives and Silver `.tar` shards with SHA-256 and archive-security verification.
-- GitHub Actions CI (Ruff lint, secret/artifact hygiene, 52 unit + offline integration + storage recovery + dbt fixture tests without private credentials; plus 2 `@pytest.mark.live` Google Drive workspace & recovery tests).
+- **Engineering Documentation:** See [docs/engineering/technology-audit.md](docs/engineering/technology-audit.md), [docs/engineering/data-ownership.md](docs/engineering/data-ownership.md), [docs/engineering/data-contracts.md](docs/engineering/data-contracts.md), [docs/engineering/failure-recovery.md](docs/engineering/failure-recovery.md), [docs/engineering/runtime-configuration.md](docs/engineering/runtime-configuration.md), [docs/engineering/verification-matrix.md](docs/engineering/verification-matrix.md), [docs/engineering/limitations.md](docs/engineering/limitations.md), and [analytics/reports/storage_performance.md](analytics/reports/storage_performance.md).
+- GitHub Actions CI (Ruff lint, secret/artifact hygiene, 61 unit + offline integration + S3-compatible + PyTorch multi-worker + live PostgreSQL + dbt fixture tests without private credentials; plus 2 `@pytest.mark.live` Google Drive workspace & recovery tests).
 - **Verified Real-Dataset Coverage (3 of 10 MVTec 3D-AD Categories, `1,169` Total Samples):**
   - `cable_gland` (manufactured): `354` samples (`223` train, `23` val, `108` test; `253` PASS, `101` WARN near-dups, `0` FAIL/QUARANTINE; FG 3D missing `1.61%` vs BG `44.68%`; mean `fg_rgb_3d_iou = 0.843`, min `0.715`).
   - `cookie` (organic): `363` samples (`210` train, `22` val, `131` test; `248` PASS, `115` WARN near-dups, `0` FAIL/QUARANTINE; FG 3D missing `0.09%` vs BG `14.43%`; mean `fg_rgb_3d_iou = 0.907`, min `0.862`).

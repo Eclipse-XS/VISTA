@@ -38,6 +38,7 @@ from vista.contracts.schemas import (
 )
 from vista.quality.normalization import DataLeakageError
 from vista.storage.base import StorageBackend
+from vista.storage.budget import LocalCacheBudgetManager
 from vista.storage.recovery import ArtifactRecoveryManager
 
 ML_FEATURE_COLUMNS: tuple[str, ...] = (
@@ -87,6 +88,9 @@ class VistaMultimodalDataset:
         local_cache_dir: Path | None = None,
         hydrate_mode: str = "on_demand",
         keep_downloaded_archives: bool = False,
+        max_cache_gb: float | None = None,
+        min_free_disk_gb: float = 0.0,
+        prefetch_categories: list[str] | tuple[str, ...] | None = None,
     ) -> None:
         if partition not in ("train", "validation", "test"):
             raise ValueError(f"Invalid partition {partition!r}; expected 'train', 'validation', or 'test'")
@@ -112,7 +116,17 @@ class VistaMultimodalDataset:
         self.verify_checksums = verify_checksums
         self.hydrate_mode = hydrate_mode
 
-        # Verify committed snapshot manifest & Parquet contracts upfront
+        budget_mgr: LocalCacheBudgetManager | None = None
+        if max_cache_gb is not None or min_free_disk_gb > 0:
+            budget_mgr = LocalCacheBudgetManager(
+                state_dir=self.local_cache_dir,
+                managed_roots=(self.local_cache_dir, self.local_bronze_root, self.local_silver_root),
+                max_cache_bytes=int((max_cache_gb or 0.0) * (1024**3)),
+                min_free_disk_bytes=int(min_free_disk_gb * (1024**3)),
+            )
+        self.budget_manager = budget_mgr
+
+        # Verify committed snapshot manifest & Parquet contracts upfront (strictly read-only)
         self.verification = verify_snapshot_directory(self.snapshot_dir)
         self._manifest: dict[str, Any] = json.loads(
             (self.snapshot_dir / "manifest.json").read_text(encoding="utf-8")
@@ -125,6 +139,7 @@ class VistaMultimodalDataset:
             snapshot_manifest=self._manifest,
             verify_checksums=self.verify_checksums,
             keep_downloaded_archives=keep_downloaded_archives,
+            budget_manager=budget_mgr,
         )
 
         table_name = (
@@ -139,8 +154,11 @@ class VistaMultimodalDataset:
         ]
         self._records.sort(key=lambda r: r["sample_key"])
 
-        if self.hydrate_mode == "category" and self.storage_backend is not None:
-            self.hydrate()
+        if self.storage_backend is not None:
+            if self.hydrate_mode == "category":
+                self.hydrate()
+            elif prefetch_categories:
+                self.hydrate(categories=tuple(prefetch_categories))
 
     @property
     def snapshot_id(self) -> str:
@@ -149,9 +167,19 @@ class VistaMultimodalDataset:
     def __len__(self) -> int:
         return len(self._records)
 
-    def hydrate(self, *, include_xyz: bool = False) -> list[dict[str, Any]]:
+    def hydrate(
+        self,
+        *,
+        include_xyz: bool = False,
+        categories: tuple[str, ...] | None = None,
+    ) -> list[dict[str, Any]]:
         """Explicitly hydrate Bronze RGB/GT and Silver shards for this dataset's categories & partition."""
-        cats = sorted({str(r["category_name"]) for r in self._records})
+        available_cats = sorted({str(r["category_name"]) for r in self._records})
+        cats = (
+            [c for c in available_cats if c in set(categories)]
+            if categories is not None
+            else available_cats
+        )
         summaries: list[dict[str, Any]] = []
         include_gt = self.partition == "test" and self.include_benchmark_labels
         for cat in cats:

@@ -1,9 +1,9 @@
 # VISTA — Multimodal Data Quality, Leakage & Operational Telemetry Report
 
-- **Generated (UTC):** `2026-11-21T10:13:55.149311+00:00`
+- **Generated (UTC):** `2026-11-24T20:33:57.095491+00:00`
 - **Immutable Gold Snapshot ID:** `snap_1_0_0_silver_v1_172131d3_a3cd04efd735`
 - **Snapshot Manifest SHA-256:** `1c50ca3d4956c6fc1c024d4a9ea7126c14364687c909fedc155d2fc5061b2440`
-- **Operational Telemetry Cutoff (UTC):** `2026-11-21T10:13:05.496583+00:00`
+- **Operational Telemetry Cutoff (UTC):** `2026-11-24T20:33:13.666710+00:00`
 - **Telemetry Consistency Audit:** `PASS (0 inconsistencies)`
 - **Dataset:** `mvtec_3d_ad` version `1.0.0`
 - **Ingested Categories:** `cable_gland, cookie, dowel`

@@ -283,3 +283,98 @@ def compute_foreground_quality(
         fg_height_above_plane_max=fg_height_above_plane_max,
         fg_plane_inlier_ratio=plane_inlier_ratio,
     )
+
+
+def _keep_largest_component(mask: np.ndarray) -> np.ndarray:
+    """Keep only the largest connected foreground component (suppresses isolated table/crumb noise)."""
+    if int(mask.sum()) == 0:
+        return mask.copy()
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask.astype(np.uint8), connectivity=8)
+    if num_labels <= 1:
+        return np.zeros_like(mask, dtype=bool)
+    areas = stats[1:, cv2.CC_STAT_AREA]
+    largest_idx = int(np.argmax(areas)) + 1
+    return labels == largest_idx
+
+
+def _fill_interior_holes(mask: np.ndarray) -> np.ndarray:
+    """Fill enclosed interior holes (e.g., dark chocolate chips, shadowed grooves) via border flood-fill."""
+    h, w = mask.shape
+    if int(mask.sum()) == 0 or h < 3 or w < 3:
+        return mask.copy()
+    padded = np.zeros((h + 2, w + 2), dtype=np.uint8)
+    padded[1:-1, 1:-1] = mask.astype(np.uint8) * 255
+    flood = padded.copy()
+    ff_mask = np.zeros((h + 4, w + 4), dtype=np.uint8)
+    cv2.floodFill(flood, ff_mask, (0, 0), 128)
+    exterior = flood[1:-1, 1:-1] == 128
+    return ~exterior
+
+
+def compare_foreground_strategies(
+    rgb_bgr: np.ndarray,
+    xyz: np.ndarray,
+    *,
+    zero_depth_epsilon: float = 1e-6,
+    max_abs_coordinate: float = 100.0,
+) -> dict[str, dict[str, float | None]]:
+    """Controlled non-learning robustness comparison against baseline `fg_otsu_plane_v1`.
+
+    Compares:
+    - `baseline_otsu_rgb`: current `fg_rgb` proxy (non-circular with 3D validity).
+    - `rgb_holefill_lcc`: `fg_rgb` with interior hole-fill + largest connected component
+      (remains non-circular with 3D validity; closes dark internal textures like chocolate chips/ribs).
+    - `plane_3d_baseline`: current `fg_3d` support-plane height-residual proxy.
+    - `plane_3d_lcc`: `fg_3d` filtered to largest connected component (suppresses isolated 3D table noise).
+    - `union_lcc_diagnostic`: hole-filled union `(rgb_holefill_lcc | plane_3d_lcc)` — useful for
+      downstream CV background masking, NOT for measuring non-circular `fg_missing_3d_ratio`.
+
+    Note: Cross-mask IoU measures agreement between two unsupervised proxies, NOT ground-truth
+    segmentation accuracy.
+    """
+    if rgb_bgr.ndim == 2:
+        lum = rgb_bgr.astype(np.float64)
+    else:
+        lum = (
+            0.2126 * rgb_bgr[:, :, 2].astype(np.float64)
+            + 0.7152 * rgb_bgr[:, :, 1].astype(np.float64)
+            + 0.0722 * rgb_bgr[:, :, 0].astype(np.float64)
+        )
+    xyz_f = xyz.astype(np.float64, copy=False)
+    finite = np.isfinite(xyz_f).all(axis=2)
+    z_raw = np.where(finite, xyz_f[:, :, 2], 0.0)
+    valid_3d = (
+        finite
+        & (np.abs(z_raw) > zero_depth_epsilon)
+        & (np.abs(np.where(finite, xyz_f[:, :, 0], 0.0)) <= max_abs_coordinate)
+        & (np.abs(np.where(finite, xyz_f[:, :, 1], 0.0)) <= max_abs_coordinate)
+        & (np.abs(z_raw) <= max_abs_coordinate)
+    )
+
+    fg_rgb = segment_rgb_foreground(lum)
+    fg_3d, _, _ = segment_3d_plane_foreground(xyz_f, valid_3d)
+    fg_rgb_hf = _fill_interior_holes(_keep_largest_component(fg_rgb))
+    fg_3d_lcc = _keep_largest_component(fg_3d)
+    fg_union = _fill_interior_holes(_keep_largest_component(fg_rgb_hf | fg_3d_lcc))
+
+    total_px = float(max(lum.size, 1))
+
+    def _iou(a: np.ndarray, b: np.ndarray) -> float | None:
+        u = int((a | b).sum())
+        return float((a & b).sum() / u) if u > 0 else None
+
+    def _summ(mask: np.ndarray, ref_3d: np.ndarray) -> dict[str, float | None]:
+        cnt = int(mask.sum())
+        return {
+            "area_ratio": float(cnt / total_px),
+            "fg_missing_3d_ratio": float(1.0 - valid_3d[mask].mean()) if cnt > 0 else None,
+            "proxy_iou_vs_3d": _iou(mask, ref_3d),
+        }
+
+    return {
+        "baseline_otsu_rgb": _summ(fg_rgb, fg_3d),
+        "rgb_holefill_lcc": _summ(fg_rgb_hf, fg_3d_lcc),
+        "plane_3d_baseline": _summ(fg_3d, fg_rgb),
+        "plane_3d_lcc": _summ(fg_3d_lcc, fg_rgb_hf),
+        "union_lcc_diagnostic": _summ(fg_union, fg_3d_lcc),
+    }

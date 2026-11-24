@@ -11,8 +11,6 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from vista.metadata.models import (
-    PIPELINE_ALL_STATUSES,
-    STAGE_ALL_STATUSES,
     ArtifactLineage,
     BronzeArchive,
     Category,
@@ -37,6 +35,14 @@ def _utcnow() -> datetime:
 
 class SnapshotImmutabilityError(RuntimeError):
     """Raised when attempting to mutate or overwrite a previously committed Gold snapshot."""
+
+
+class InvalidStateTransitionError(ValueError):
+    """Raised when an operational PipelineRun, StageRun, or GoldSnapshot transition is illegal."""
+
+
+_PIPELINE_TERMINAL_STATUSES = frozenset({"SUCCEEDED", "FAILED", "INTERRUPTED"})
+_STAGE_TERMINAL_STATUSES = frozenset({"SUCCEEDED", "FAILED", "INTERRUPTED", "SKIPPED"})
 
 
 class MetadataRepository:
@@ -128,10 +134,19 @@ class MetadataRepository:
     def finish_pipeline_run(
         self, run_id: str, status: str, error_message: str | None = None
     ) -> PipelineRun:
-        if status not in PIPELINE_ALL_STATUSES:
-            raise ValueError(f"Invalid PipelineRun status: {status!r}")
+        if status not in _PIPELINE_TERMINAL_STATUSES:
+            raise InvalidStateTransitionError(
+                f"PipelineRun {run_id!r} cannot finish into non-terminal status {status!r}"
+            )
         run = self.session.get(PipelineRun, run_id)
-        assert run is not None
+        if run is None:
+            raise KeyError(f"Unknown pipeline run_id: {run_id}")
+        if run.status in _PIPELINE_TERMINAL_STATUSES:
+            if run.status != status:
+                raise InvalidStateTransitionError(
+                    f"Illegal PipelineRun transition for {run_id!r}: {run.status} -> {status}"
+                )
+            return run
         now = _utcnow()
         run.status = status
         run.finished_at = now
@@ -176,10 +191,19 @@ class MetadataRepository:
         checkpoint: dict[str, Any] | None = None,
         error_message: str | None = None,
     ) -> StageRun:
-        if status not in STAGE_ALL_STATUSES:
-            raise ValueError(f"Invalid StageRun status: {status!r}")
+        if status not in _STAGE_TERMINAL_STATUSES:
+            raise InvalidStateTransitionError(
+                f"StageRun {stage_run_id} cannot finish into non-terminal status {status!r}"
+            )
         stage = self.session.get(StageRun, stage_run_id)
-        assert stage is not None
+        if stage is None:
+            raise KeyError(f"Unknown stage_run_id: {stage_run_id}")
+        if stage.status in _STAGE_TERMINAL_STATUSES:
+            if stage.status != status:
+                raise InvalidStateTransitionError(
+                    f"Illegal StageRun transition for {stage_run_id}: {stage.status} -> {status}"
+                )
+            return stage
         now = _utcnow()
         stage.status = status
         stage.finished_at = now
@@ -431,6 +455,11 @@ class MetadataRepository:
                     f"Committed snapshot {snapshot_id!r} manifest checksum cannot be altered"
                 )
             return snap
+        if snap.status != "STAGED":
+            raise InvalidStateTransitionError(
+                f"Illegal GoldSnapshot transition for {snapshot_id!r}: {snap.status} -> COMMITTED "
+                "(must be STAGED before COMMITTED)"
+            )
         snap.status = "COMMITTED"
         snap.manifest_sha256 = manifest_sha256
         snap.local_snapshot_dir = local_snapshot_dir
@@ -446,6 +475,22 @@ class MetadataRepository:
             self.session.flush()
 
     def record_gold_export(self, **kwargs: Any) -> GoldExport:
+        snapshot_id = kwargs.get("snapshot_id")
+        table_name = kwargs["table_name"]
+        if snapshot_id is not None:
+            existing = self.session.execute(
+                select(GoldExport).where(
+                    GoldExport.snapshot_id == snapshot_id,
+                    GoldExport.table_name == table_name,
+                )
+            ).scalar_one_or_none()
+            if existing is not None:
+                if existing.sha256 != kwargs["sha256"]:
+                    raise SnapshotImmutabilityError(
+                        f"GoldExport drift for snapshot={snapshot_id!r}, table={table_name!r}: "
+                        f"existing={existing.sha256}, new={kwargs['sha256']}"
+                    )
+                return existing
         row = GoldExport(**kwargs)
         self.session.add(row)
         self.session.flush()

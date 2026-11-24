@@ -3,7 +3,28 @@
 from pathlib import Path
 
 from vista.config import StorageConfig
-from vista.storage.base import RemoteObjectInfo, StorageBackend, md5_file, sha256_file
+from vista.storage.base import (
+    CorruptedCacheError,
+    DiskBudgetExceededError,
+    RemoteArtifactUnavailableError,
+    RemoteObjectInfo,
+    StorageAuthError,
+    StorageBackend,
+    StorageConfigurationError,
+    StorageError,
+    StorageErrorCategory,
+    StorageIntegrityError,
+    StorageNotFoundError,
+    StoragePermissionError,
+    StorageRateLimitError,
+    StorageTimeoutError,
+    StorageTransientError,
+    atomic_temp_path,
+    interprocess_file_lock,
+    md5_file,
+    sha256_file,
+)
+from vista.storage.budget import BudgetCheckResult, LocalCacheBudgetManager
 from vista.storage.cache import (
     CacheCleanupSummary,
     CacheCleanupVerificationError,
@@ -22,7 +43,7 @@ from vista.storage.paths import (
     silver_artifact_path,
     validate_workspace_path,
 )
-from vista.storage.rclone import RcloneStorageBackend
+from vista.storage.rclone import RcloneStorageBackend, classify_rclone_failure
 from vista.storage.recovery import (
     ArchiveSecurityError,
     ArtifactRecoveryManager,
@@ -40,7 +61,10 @@ def build_storage_backend(config: StorageConfig | None = None) -> StorageBackend
         return LocalStorageBackend(Path(cfg.root))
     if cfg.backend in {"gdrive", "s3"}:
         return RcloneStorageBackend(cfg)
-    raise ValueError(f"Unsupported STORAGE_BACKEND: {cfg.backend!r}")
+    raise StorageConfigurationError(
+        f"Unsupported STORAGE_BACKEND: {cfg.backend!r}",
+        operation="build_storage_backend",
+    )
 
 
 __all__ = [
@@ -48,21 +72,39 @@ __all__ = [
     "ArchiveSecurityError",
     "ArtifactRecoveryManager",
     "BronzeImmutabilityError",
+    "BudgetCheckResult",
     "CacheCleanupSummary",
     "CacheCleanupVerificationError",
+    "CorruptedCacheError",
+    "DiskBudgetExceededError",
     "IndexedTarShard",
+    "LocalCacheBudgetManager",
     "LocalStorageBackend",
     "RcloneStorageBackend",
+    "RemoteArtifactUnavailableError",
     "RemoteObjectInfo",
+    "StorageAuthError",
     "StorageBackend",
     "StorageConfig",
+    "StorageConfigurationError",
+    "StorageError",
+    "StorageErrorCategory",
+    "StorageIntegrityError",
+    "StorageNotFoundError",
+    "StoragePermissionError",
+    "StorageRateLimitError",
+    "StorageTimeoutError",
+    "StorageTransientError",
     "WorkspacePathError",
+    "atomic_temp_path",
     "bronze_archive_path",
     "bronze_manifest_path",
     "bronze_raw_sample_path",
     "build_storage_backend",
+    "classify_rclone_failure",
     "cleanup_verified_category_cache",
     "gold_table_path",
+    "interprocess_file_lock",
     "is_bronze_path",
     "md5_file",
     "parse_shard_member_uri",
