@@ -188,6 +188,53 @@ class CategorySpec:
     material_type: str
 
 
+def resolve_mlflow_tracking_uri(
+    mode: str,
+    explicit_uri: str | None,
+    *,
+    default_sqlite_path: Path,
+    port: int = 5050,
+) -> str:
+    """Deterministically resolve and validate `(VISTA_MLFLOW_MODE, VISTA_MLFLOW_TRACKING_URI)`.
+
+    Rules:
+    - `disabled`: tracking disabled; returns `""` (never silently activates a tracking store).
+    - `server`: defaults to `http://127.0.0.1:<port>`. If an explicit URI is given, it MUST use
+      `http://` or `https://`; local `sqlite://` / `file://` URIs are rejected with `ValueError`.
+    - `local`: defaults to `sqlite:///<default_sqlite_path>`. If an explicit URI is given, it MUST
+      use `sqlite://` or `file://`; remote `http(s)://` or other schemes are rejected with `ValueError`.
+    """
+    norm_mode = (mode or "local").strip().lower()
+    if norm_mode not in ("local", "server", "disabled"):
+        raise ValueError(
+            f"Invalid VISTA_MLFLOW_MODE={norm_mode!r}; expected 'local', 'server', or 'disabled'"
+        )
+    uri = (explicit_uri or "").strip()
+    if norm_mode == "disabled":
+        return ""
+    if norm_mode == "server":
+        if not uri:
+            return f"http://127.0.0.1:{int(port)}"
+        lower = uri.lower()
+        if not lower.startswith(("http://", "https://")):
+            raise ValueError(
+                f"Incompatible MLflow configuration: VISTA_MLFLOW_MODE='server' requires an "
+                f"'http://' or 'https://' tracking URI (or unset VISTA_MLFLOW_TRACKING_URI to use "
+                f"http://127.0.0.1:{int(port)}), got {uri!r}"
+            )
+        return uri
+    # norm_mode == "local"
+    if not uri:
+        return f"sqlite:///{default_sqlite_path.as_posix()}"
+    lower = uri.lower()
+    if not lower.startswith(("sqlite://", "file:")):
+        raise ValueError(
+            f"Incompatible MLflow configuration: VISTA_MLFLOW_MODE='local' requires a local "
+            f"'sqlite://' or 'file:' tracking URI (or unset VISTA_MLFLOW_TRACKING_URI), got {uri!r}"
+        )
+    return uri
+
+
 @dataclass(frozen=True)
 class VistaConfig:
     project_root: Path
@@ -204,8 +251,34 @@ class VistaConfig:
     quality: QualityConfig
     categories: dict[str, CategorySpec]
     max_local_cache_gb: float = 6.0
-    mlflow_tracking_uri: str = "file:./mlruns"
+    min_free_disk_gb: float = 2.0
+    mlflow_mode: str = "local"
+    mlflow_tracking_uri: str = "sqlite:///mlruns/mlflow.db"
     mlflow_experiment: str = "vista-data-engineering"
+    mlflow_failure_policy: str = "warn"
+    mlflow_port: int = 5050
+
+    def __post_init__(self) -> None:
+        if self.mlflow_mode not in ("local", "server", "disabled"):
+            raise ValueError(
+                f"Invalid mlflow_mode={self.mlflow_mode!r}; expected 'local', 'server', or 'disabled'"
+            )
+        if self.mlflow_failure_policy not in ("warn", "strict"):
+            raise ValueError(
+                f"Invalid mlflow_failure_policy={self.mlflow_failure_policy!r}; expected 'warn' or 'strict'"
+            )
+        if self.mlflow_mode == "server" and self.mlflow_tracking_uri:
+            if not self.mlflow_tracking_uri.lower().startswith(("http://", "https://")):
+                raise ValueError(
+                    f"Incompatible MLflow configuration: mlflow_mode='server' cannot use "
+                    f"non-HTTP tracking URI {self.mlflow_tracking_uri!r}"
+                )
+        if self.mlflow_mode == "local" and self.mlflow_tracking_uri:
+            if not self.mlflow_tracking_uri.lower().startswith(("sqlite://", "file:")):
+                raise ValueError(
+                    f"Incompatible MLflow configuration: mlflow_mode='local' cannot use "
+                    f"remote tracking URI {self.mlflow_tracking_uri!r}"
+                )
 
     @property
     def local_bronze_dir(self) -> Path:
@@ -255,17 +328,49 @@ class VistaConfig:
         }
 
         dotenv_vals = load_env_file(dotenv_path or DEFAULT_DOTENV)
-        default_mlflow_db = (PROJECT_ROOT / "mlruns" / "mlflow.db").as_posix()
-        mlflow_uri = (
+        default_mlflow_db = PROJECT_ROOT / "mlruns" / "mlflow.db"
+        mlflow_mode = (
+            os.environ.get("VISTA_MLFLOW_MODE")
+            or dotenv_vals.get("VISTA_MLFLOW_MODE")
+            or "local"
+        ).strip().lower()
+        mlflow_port_raw = (
+            os.environ.get("VISTA_MLFLOW_PORT")
+            or dotenv_vals.get("VISTA_MLFLOW_PORT")
+            or "5050"
+        ).strip()
+        try:
+            mlflow_port = int(mlflow_port_raw)
+            if not (1 <= mlflow_port <= 65535):
+                raise ValueError("port out of range")
+        except ValueError as exc:
+            raise ValueError(f"Invalid VISTA_MLFLOW_PORT={mlflow_port_raw!r}") from exc
+
+        explicit_uri = (
             os.environ.get("VISTA_MLFLOW_TRACKING_URI")
             or dotenv_vals.get("VISTA_MLFLOW_TRACKING_URI")
-            or f"sqlite:///{default_mlflow_db}"
+            or ""
+        ).strip()
+        mlflow_uri = resolve_mlflow_tracking_uri(
+            mlflow_mode,
+            explicit_uri,
+            default_sqlite_path=default_mlflow_db,
+            port=mlflow_port,
         )
         mlflow_exp = (
             os.environ.get("VISTA_MLFLOW_EXPERIMENT")
             or dotenv_vals.get("VISTA_MLFLOW_EXPERIMENT")
             or "vista-data-engineering"
         )
+        mlflow_failure_policy = (
+            os.environ.get("VISTA_MLFLOW_FAILURE_POLICY")
+            or dotenv_vals.get("VISTA_MLFLOW_FAILURE_POLICY")
+            or "warn"
+        ).strip().lower()
+        if mlflow_failure_policy not in ("warn", "strict"):
+            raise ValueError(
+                f"Invalid VISTA_MLFLOW_FAILURE_POLICY={mlflow_failure_policy!r}; expected 'warn' or 'strict'"
+            )
 
         return cls(
             project_root=PROJECT_ROOT,
@@ -282,6 +387,10 @@ class VistaConfig:
             quality=QualityConfig(**qual_raw) if qual_raw else QualityConfig(),
             categories=categories,
             max_local_cache_gb=float(cache_raw.get("max_local_cache_gb", 6.0)),
+            min_free_disk_gb=float(cache_raw.get("min_free_disk_gb", 2.0)),
+            mlflow_mode=mlflow_mode,
             mlflow_tracking_uri=mlflow_uri,
             mlflow_experiment=mlflow_exp,
+            mlflow_failure_policy=mlflow_failure_policy,
+            mlflow_port=mlflow_port,
         )

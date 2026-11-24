@@ -1,8 +1,8 @@
-"""Sample-level RGB appearance and 3D geometric quality metrics.
+"""Sample-level RGB appearance, 3D geometry, and foreground-aware quality metrics.
 
-All metrics are strictly unsupervised functions of raw input modalities (RGB, XYZ)
-and NEVER inspect benchmark test labels as inputs. See `docs/quality_metrics.md`
-for exact mathematical definitions and known limitations.
+All raw metrics are strictly deterministic functions of a single sample's raw
+RGB and XYZ inputs and NEVER inspect benchmark test labels.
+See `docs/quality_metrics.md` for mathematical definitions and limitations.
 """
 
 from __future__ import annotations
@@ -13,11 +13,12 @@ import cv2
 import numpy as np
 
 from vista.config import QualityConfig
+from vista.quality.foreground import compute_foreground_quality
 
 
 @dataclass(frozen=True)
 class SampleQualityStats:
-    # RGB appearance metrics
+    # Global RGB appearance metrics
     rgb_brightness_mean: float
     rgb_brightness_std: float
     rgb_contrast_rms: float
@@ -28,7 +29,7 @@ class SampleQualityStats:
     rgb_underexposed_ratio: float
     rgb_overexposed_ratio: float
     rgb_dynamic_range: float
-    # 3D geometry metrics
+    # Global 3D geometry metrics
     valid_point_ratio: float
     missing_point_ratio: float
     nan_point_ratio: float
@@ -44,11 +45,31 @@ class SampleQualityStats:
     z_span: float | None
     bbox_volume: float | None
     point_density_proxy: float | None
+    # Foreground-aware, background-only, and framing metrics
+    fg_method_version: str
+    fg_area_ratio: float
+    fg_3d_area_ratio: float
+    fg_rgb_3d_iou: float | None
+    fg_bbox_fill_ratio: float | None
+    fg_center_offset_norm: float | None
+    fg_rgb_brightness_mean: float | None
+    fg_rgb_contrast_rms: float | None
+    fg_rgb_laplacian_var: float | None
+    fg_rgb_saturation_mean: float | None
+    fg_rgb_underexposed_ratio: float | None
+    fg_rgb_overexposed_ratio: float | None
+    fg_valid_3d_ratio: float | None
+    fg_missing_3d_ratio: float | None
+    bg_missing_3d_ratio: float | None
+    bg_rgb_brightness_mean: float | None
+    fg_z_mean: float | None
+    fg_z_std: float | None
+    fg_height_above_plane_max: float | None
+    fg_plane_inlier_ratio: float | None
 
 
 def compute_rgb_quality(rgb_bgr: np.ndarray, cfg: QualityConfig) -> dict[str, float]:
-    """Compute RGB photometric, contrast, sharpness, saturation, and exposure indicators."""
-    # OpenCV loads images in BGR order; convert to RGB and Rec.709 luminance Y
+    """Compute global RGB photometric, contrast, sharpness, saturation, and exposure indicators."""
     if rgb_bgr.ndim == 2:
         gray_u8 = rgb_bgr.astype(np.uint8, copy=False)
         lum = gray_u8.astype(np.float64)
@@ -60,7 +81,6 @@ def compute_rgb_quality(rgb_bgr: np.ndarray, cfg: QualityConfig) -> dict[str, fl
         lum = 0.2126 * r + 0.7152 * g + 0.0722 * b
         hsv = cv2.cvtColor(rgb_bgr, cv2.COLOR_BGR2HSV)
         sat_mean = float(hsv[:, :, 1].mean() / 255.0)
-        gray_u8 = np.clip(np.round(lum), 0, 255).astype(np.uint8)
 
     brightness_mean = float(lum.mean())
     brightness_std = float(lum.std())
@@ -69,7 +89,6 @@ def compute_rgb_quality(rgb_bgr: np.ndarray, cfg: QualityConfig) -> dict[str, fl
     contrast_p5_p95 = float(p95 - p5)
     dynamic_range = float(lum.max() - lum.min())
 
-    # Sharpness estimators on float32 grayscale (canonical 4-neighbor Laplacian kernel via ksize=1)
     gray_f32 = lum.astype(np.float32)
     lap = cv2.Laplacian(gray_f32, cv2.CV_32F, ksize=1)
     laplacian_var = float(lap.var())
@@ -199,13 +218,21 @@ def compute_sample_quality(
         zero_depth_epsilon=zero_depth_epsilon,
         max_abs_coordinate=max_abs_coordinate,
     )
-    return SampleQualityStats(**rgb_stats, **geo_stats)
+    fg_stats = compute_foreground_quality(
+        rgb_bgr,
+        xyz,
+        quality_cfg=quality_cfg,
+        zero_depth_epsilon=zero_depth_epsilon,
+        max_abs_coordinate=max_abs_coordinate,
+    )
+    return SampleQualityStats(**rgb_stats, **geo_stats, **fg_stats.__dict__)
 
 
 def robust_mad_zscores(values: list[float | None]) -> list[float | None]:
-    """Compute modified Z-scores using median and MAD: 0.6745 * (x - med) / MAD.
+    """Compute descriptive modified Z-scores using median and MAD: 0.6745 * (x - med) / MAD.
 
-    Returns 0.0 when MAD == 0 (constant series) and None for missing entries.
+    NOTE: Intended strictly for descriptive EDA inspection. For ML features,
+    always use `vista.quality.normalization.fit_train_only_normalizer`.
     """
     valid = np.array([v for v in values if v is not None], dtype=np.float64)
     if valid.size < 3:

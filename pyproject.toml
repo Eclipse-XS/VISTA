@@ -19,21 +19,22 @@ dependencies = [
     "dbt-duckdb>=1.8",
     "psycopg[binary]>=3.2",
     "sqlalchemy>=2.0",
-    "pydantic>=2.8",
-    "pydantic-settings>=2.4",
     "PyYAML>=6.0",
     "httpx>=0.27",
     "structlog>=24.4",
     "matplotlib>=3.9",
     "scipy>=1.13",
     "prefect>=3.0",
-    "mlflow-skinny>=2.16",
+    "mlflow-skinny>=3.0,<4.0",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8.3",
     "ruff>=0.6",
+]
+ml = [
+    "torch>=2.4",
 ]
 
 [project.scripts]
@@ -45,8 +46,19 @@ include = ["vista*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q"
+addopts = "-q --strict-markers"
+markers = [
+    "live: integration tests requiring live external services (Google Drive / network)",
+    "postgres: integration tests requiring a live PostgreSQL instance (VISTA_REQUIRE_POSTGRES=1 fails instead of skipping)",
+    "s3_compat: integration tests requiring rclone for local S3-compatible REST API verification (VISTA_REQUIRE_S3_RCLONE=1 fails instead of skipping)",
+    "ml_loader: integration tests requiring PyTorch DataLoader multiworker verification (VISTA_REQUIRE_TORCH=1 fails instead of skipping)",
+    "mlflow_server: integration tests requiring a live MLflow HTTP tracking server (VISTA_REQUIRE_MLFLOW_SERVER=1 fails instead of skipping)",
+]
 
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+ignore = ["E501"]

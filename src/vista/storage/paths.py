@@ -119,3 +119,15 @@ def silver_artifact_path(
 
 def gold_table_path(dataset_version: str, table_name: str) -> str:
     return validate_workspace_path(f"gold/mvtec_3d_ad/{dataset_version}/{table_name}.parquet")
+
+
+def gold_snapshot_prefix(snapshot_id: str) -> str:
+    return validate_workspace_path(f"gold/mvtec_3d_ad/snapshots/{snapshot_id}")
+
+
+def gold_snapshot_file_path(snapshot_id: str, filename: str) -> str:
+    return validate_workspace_path(f"gold/mvtec_3d_ad/snapshots/{snapshot_id}/{filename}")
+
+
+def gold_latest_pointer_path() -> str:
+    return validate_workspace_path("gold/mvtec_3d_ad/LATEST_SNAPSHOT.json")
